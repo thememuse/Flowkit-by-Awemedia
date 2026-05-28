@@ -84,7 +84,7 @@ python3 -m PyInstaller \
     --hidden-import "email_validator" \
     --hidden-import "anyio" \
     --hidden-import "starlette" \
-    --add-data "agent/models.json:agent" \
+    --add-data "$PROJECT_ROOT/agent/models.json:agent" \
     --collect-all "uvicorn" \
     --collect-all "fastapi" \
     --collect-all "starlette" \
