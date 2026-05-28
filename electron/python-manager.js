@@ -92,40 +92,65 @@ class PythonManager {
   }
 
   _getBundledAgentPath() {
-    const resourcesPath = app.isPackaged
-      ? process.resourcesPath
-      : path.join(__dirname, '..', 'resources');
-
-    if (process.platform === 'win32') {
-      const onedirPath = path.join(resourcesPath, 'agent-win', 'agent', 'agent.exe');
-      if (fs.existsSync(onedirPath)) return onedirPath;
-      return path.join(resourcesPath, 'agent-win', 'agent.exe');
-    } else if (process.platform === 'darwin') {
-      const onedirPath = path.join(resourcesPath, 'agent-mac', 'agent', 'agent');
-      if (fs.existsSync(onedirPath)) return onedirPath;
-      return path.join(resourcesPath, 'agent-mac', 'agent');
+    const searchDirs = [];
+    if (app.isPackaged) {
+      searchDirs.push(path.join(process.resourcesPath, 'resources'));
+      searchDirs.push(process.resourcesPath);
+    } else {
+      searchDirs.push(path.join(__dirname, '..', 'resources'));
     }
-    const onedirPath = path.join(resourcesPath, 'agent-linux', 'agent', 'agent');
-    if (fs.existsSync(onedirPath)) return onedirPath;
-    return path.join(resourcesPath, 'agent-linux', 'agent');
+
+    const platform = process.platform;
+    for (const baseDir of searchDirs) {
+      if (platform === 'win32') {
+        const onedir = path.join(baseDir, 'agent-win', 'agent', 'agent.exe');
+        if (fs.existsSync(onedir)) return onedir;
+        const onefile = path.join(baseDir, 'agent-win', 'agent.exe');
+        if (fs.existsSync(onefile)) return onefile;
+      } else if (platform === 'darwin') {
+        const onedir = path.join(baseDir, 'agent-mac', 'agent', 'agent');
+        if (fs.existsSync(onedir)) return onedir;
+        const onefile = path.join(baseDir, 'agent-mac', 'agent');
+        if (fs.existsSync(onefile)) return onefile;
+      } else {
+        const onedir = path.join(baseDir, 'agent-linux', 'agent', 'agent');
+        if (fs.existsSync(onedir)) return onedir;
+        const onefile = path.join(baseDir, 'agent-linux', 'agent');
+        if (fs.existsSync(onefile)) return onefile;
+      }
+    }
+    return null;
   }
 
   _getBundledPythonPath() {
-    const resourcesPath = app.isPackaged
-      ? process.resourcesPath
-      : path.join(__dirname, '..', 'resources');
+    const searchDirs = [];
+    if (app.isPackaged) {
+      searchDirs.push(path.join(process.resourcesPath, 'resources'));
+      searchDirs.push(process.resourcesPath);
+    } else {
+      searchDirs.push(path.join(__dirname, '..', 'resources'));
+    }
 
-    if (process.platform === 'win32') {
-      return path.join(resourcesPath, 'python', 'python.exe');
-    } else if (process.platform === 'darwin') {
-      return path.join(resourcesPath, 'python', 'bin', 'python3');
+    const platform = process.platform;
+    for (const baseDir of searchDirs) {
+      if (platform === 'win32') {
+        const pyPath = path.join(baseDir, 'python', 'python.exe');
+        if (fs.existsSync(pyPath)) return pyPath;
+      } else if (platform === 'darwin') {
+        const pyPath = path.join(baseDir, 'python', 'bin', 'python3');
+        if (fs.existsSync(pyPath)) return pyPath;
+      }
     }
     return null;
   }
 
   _getWorkingDir() {
     if (app.isPackaged) {
-      return path.join(process.resourcesPath, 'resources', 'agent-src');
+      const srcDir = path.join(process.resourcesPath, 'resources', 'agent-src');
+      if (fs.existsSync(srcDir)) return srcDir;
+      const resDir = path.join(process.resourcesPath, 'resources');
+      if (fs.existsSync(resDir)) return resDir;
+      return process.resourcesPath;
     }
     return path.join(__dirname, '..');
   }
@@ -210,7 +235,7 @@ class PythonManager {
 
     const pythonInfo = this._findPythonBinary();
     if (!pythonInfo) {
-      const err = 'Python 3 not found. Please install Python 3.10+ from python.org';
+      const err = 'Không thể tìm thấy công cụ xử lý video Flow Agent đi kèm ứng dụng. Vui lòng thử cài đặt lại hoặc liên hệ hỗ trợ kỹ thuật.';
       this._onError(err);
       throw new Error(err);
     }
@@ -228,7 +253,9 @@ class PythonManager {
       PYTHONIOENCODING: 'utf-8',
     };
 
-    const cwd = this._getWorkingDir();
+    const cwd = pythonInfo.mode === 'bundled'
+      ? path.dirname(pythonInfo.path)
+      : this._getWorkingDir();
     let proc;
 
     if (pythonInfo.mode === 'bundled') {
