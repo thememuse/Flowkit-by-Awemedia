@@ -60,6 +60,7 @@ class WorkerController:
     def __init__(self):
         self._shutdown = asyncio.Event()
         self._active_ids: set[str] = set()
+        self._active_video_ids: set[str] = set()  # Track active video request IDs
         self._rate_limiter = APIRateLimiter(MAX_CONCURRENT_REQUESTS, API_COOLDOWN)
         self._deferred: dict[str, float] = {}  # rid -> defer_until timestamp
         self._retry_after: dict[str, float] = {}  # rid -> retry_after timestamp
@@ -85,6 +86,16 @@ class WorkerController:
     async def start(self):
         """Start the worker loop."""
         await self._cleanup_stale_processing()
+        
+        # Check if there are any PENDING requests in the database to prevent startup spam
+        try:
+            pending = await crud.list_requests(status="PENDING")
+            if pending:
+                self._paused = True
+                logger.warning("Found %d pending requests on startup. Worker initialized in PAUSED state to prevent spam.", len(pending))
+        except Exception as e:
+            logger.warning("Could not check pending requests count on startup: %s", e)
+            
         await self._run_loop()
 
     def request_shutdown(self):
@@ -152,6 +163,12 @@ class WorkerController:
                     if slots_available <= 0:
                         break
                     rid = req["id"]
+                    req_type = req.get("type", "")
+                    
+                    # Strictly serialize video-related requests (1 at a time max)
+                    is_video = req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS", "UPSCALE_VIDEO")
+                    if is_video and len(self._active_video_ids) >= 1:
+                        continue
 
                     # Skip in-flight
                     if rid in self._active_ids:
@@ -167,6 +184,8 @@ class WorkerController:
                         continue
 
                     self._active_ids.add(rid)
+                    if is_video:
+                        self._active_video_ids.add(rid)
                     slots_available -= 1
                     asyncio.create_task(self._run_one(req))
 
@@ -182,6 +201,8 @@ class WorkerController:
 
     async def _run_one(self, req: dict):
         rid = req["id"]
+        req_type = req.get("type", "")
+        is_video = req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS", "UPSCALE_VIDEO")
         try:
             await self._rate_limiter.acquire()
             try:
@@ -190,6 +211,8 @@ class WorkerController:
                 self._rate_limiter.release()
         finally:
             self._active_ids.discard(rid)
+            if is_video:
+                self._active_video_ids.discard(rid)
 
 
 async def _prerequisites_met(req: dict, orientation: str) -> bool:
