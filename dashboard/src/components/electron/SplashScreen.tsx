@@ -164,8 +164,8 @@ export default function SplashScreen({ onReady }: SplashScreenProps) {
         >
           <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 8 }}>{error}</div>
           <div style={{ color: '#64748b', fontSize: 11, marginBottom: 12 }}>
-            Đảm bảo Python 3.10+ đã cài đặt và virtual environment tồn tại với requirements.txt.<br />
-            Chạy lệnh: <code style={{ color: '#94a3b8' }}>python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt</code>
+            Không thể khởi động hệ thống xử lý video ngầm.<br />
+            Vui lòng tắt hoàn toàn ứng dụng và khởi động lại, hoặc liên hệ đội ngũ hỗ trợ kỹ thuật.
           </div>
           <button
             onClick={handleRetry}
