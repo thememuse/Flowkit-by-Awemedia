@@ -69,7 +69,10 @@ class BrowserManager {
     try {
       const { execSync } = require('child_process');
       const playwrightDir = path.dirname(require.resolve('playwright'));
-      const cliPath = path.join(playwrightDir, 'cli.js');
+      let cliPath = path.join(playwrightDir, 'cli.js');
+      if (cliPath.includes('app.asar')) {
+        cliPath = cliPath.replace('app.asar', 'app.asar.unpacked');
+      }
 
       this._log(`[Browser] Đang tải Chromium qua Playwright CLI nội bộ: ${cliPath}`);
       execSync(`"${process.execPath}" "${cliPath}" install chromium`, {
