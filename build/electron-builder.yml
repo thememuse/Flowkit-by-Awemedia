@@ -85,7 +85,6 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Flow Kit
-  runAfterFinish: true
   include: build/installer.nsh
 
 # Linux (bonus)
