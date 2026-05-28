@@ -27,6 +27,7 @@ class FlowClient:
         self._extension_ws = None  # Set by WS server when extension connects
         self._pending: dict[str, asyncio.Future] = {}
         self._flow_key: Optional[str] = None
+        self._api_key: str = GOOGLE_API_KEY
         # WS stats
         self._ws_connect_count = 0
         self._ws_disconnect_count = 0
@@ -58,6 +59,16 @@ class FlowClient:
         self._flow_key = key
 
     @property
+    def api_key(self) -> str:
+        return self._api_key
+
+    def set_api_key(self, key: str):
+        if key and key.startswith("AIza"):
+            if self._api_key != key:
+                self._api_key = key
+                logger.info("Dynamic Google API Key updated: %s...%s", key[:8], key[-8:])
+
+    @property
     def connected(self) -> bool:
         return self._extension_ws is not None
 
@@ -81,8 +92,16 @@ class FlowClient:
             asyncio.create_task(self._sync_tier())
             return
 
+        if data.get("type") == "api_key_captured":
+            api_key = data.get("apiKey")
+            if api_key:
+                self.set_api_key(api_key)
+            return
+
         if data.get("type") == "extension_ready":
             logger.info("Extension ready, flowKey=%s", "yes" if data.get("flowKeyPresent") else "no")
+            if data.get("apiKey"):
+                self.set_api_key(data.get("apiKey"))
             asyncio.create_task(self._sync_tier())
             return
 
@@ -276,7 +295,7 @@ class FlowClient:
         """Build full API URL."""
         path = ENDPOINTS[endpoint_key].format(**kwargs)
         sep = "&" if "?" in path else "?"
-        return f"{GOOGLE_FLOW_API}{path}{sep}key={GOOGLE_API_KEY}"
+        return f"{GOOGLE_FLOW_API}{path}{sep}key={self.api_key}"
 
     def _client_context(self, project_id: str, user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
         """Build clientContext with recaptcha placeholder."""
@@ -567,7 +586,7 @@ class FlowClient:
         Returns the raw API response which contains a fresh signed URL
         in data.fifeUrl or data.servingUri.
         """
-        url = f"{GOOGLE_FLOW_API}/v1/media/{media_id}?key={GOOGLE_API_KEY}&clientContext.tool=PINHOLE"
+        url = f"{GOOGLE_FLOW_API}/v1/media/{media_id}?key={self.api_key}&clientContext.tool=PINHOLE"
         return await self._send("api_request", {
             "url": url,
             "method": "GET",

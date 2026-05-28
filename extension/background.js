@@ -85,6 +85,27 @@ async function init() {
 
 chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
+    // Extract API key if present in query parameters
+    try {
+      if (details?.url) {
+        const urlObj = new URL(details.url);
+        const keyParam = urlObj.searchParams.get('key');
+        if (keyParam && keyParam.startsWith('AIzaSy')) {
+          chrome.storage.local.get(['activeApiKey']).then((res) => {
+            if (res.activeApiKey !== keyParam) {
+              console.log('[FlowAgent] Captured active API Key from URL:', keyParam.slice(0, 10) + '...');
+              chrome.storage.local.set({ activeApiKey: keyParam });
+              if (ws?.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'api_key_captured', apiKey: keyParam }));
+              }
+            }
+          });
+        }
+      }
+    } catch (err) {
+      console.error('[FlowAgent] Error extracting API key from url:', err);
+    }
+
     if (!details?.requestHeaders?.length) return;
     const authHeader = details.requestHeaders.find(
       (h) => h.name?.toLowerCase() === 'authorization',
@@ -180,14 +201,31 @@ function connectToAgent() {
     chrome.alarms.create('token-refresh', { periodInMinutes: 45 });
 
     // Send current state + resend token if we have one
-    ws.send(JSON.stringify({
-      type: 'extension_ready',
-      flowKeyPresent: !!flowKey,
-      tokenAge: flowKey && metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
-    }));
-    if (flowKey) {
-      ws.send(JSON.stringify({ type: 'token_captured', flowKey }));
-    }
+    chrome.storage.local.get(['activeApiKey']).then((res) => {
+      const apiKey = res.activeApiKey || API_KEY;
+      ws.send(JSON.stringify({
+        type: 'extension_ready',
+        flowKeyPresent: !!flowKey,
+        tokenAge: flowKey && metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
+        apiKey: apiKey,
+      }));
+      if (flowKey) {
+        ws.send(JSON.stringify({ type: 'token_captured', flowKey }));
+      }
+      if (apiKey) {
+        ws.send(JSON.stringify({ type: 'api_key_captured', apiKey }));
+      }
+    }).catch(() => {
+      ws.send(JSON.stringify({
+        type: 'extension_ready',
+        flowKeyPresent: !!flowKey,
+        tokenAge: flowKey && metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
+        apiKey: API_KEY,
+      }));
+      if (flowKey) {
+        ws.send(JSON.stringify({ type: 'token_captured', flowKey }));
+      }
+    });
   };
 
   ws.onmessage = async ({ data }) => {
