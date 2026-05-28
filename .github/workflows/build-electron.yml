@@ -53,15 +53,10 @@ jobs:
           chmod +x build/build-python.sh
           bash build/build-python.sh
 
-      - name: Build macOS App (arm64)
+      - name: Build macOS App (arm64 & x64)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run dist:mac:arm
-
-      - name: Build macOS App (x64)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run dist:mac:x64
+        run: npx electron-builder --mac --arm64 --x64
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
