@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { BrowserRouter, NavLink, Routes, Route, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { HashRouter, NavLink, Routes, Route, useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   LayoutDashboard, FolderOpen, ScrollText, Film, Image as ImageIcon,
   Globe, Settings, Zap, Clapperboard, Wifi, WifiOff, Plug, PlugZap, AudioWaveform
@@ -373,11 +373,11 @@ export default function App() {
         <SplashScreen onReady={() => setAgentSanSang(true)} />
       )}
       <div style={{ display: agentSanSang ? 'block' : 'none', height: '100vh' }}>
-        <BrowserRouter>
+        <HashRouter>
           <LicenseGate>
             <Layout />
           </LicenseGate>
-        </BrowserRouter>
+        </HashRouter>
       </div>
     </>
   )
