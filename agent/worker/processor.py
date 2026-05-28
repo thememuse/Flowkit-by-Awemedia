@@ -77,12 +77,20 @@ class WorkerController:
     def paused(self) -> bool:
         return self._paused
 
+    @property
+    def captcha_cooldown_until(self) -> str | None:
+        if _captcha_cooldown_until <= time.time():
+            return None
+        return _iso_from_epoch(_captcha_cooldown_until)
+
     def pause(self):
         self._paused = True
         logger.info("Worker controller PAUSED")
 
     def resume(self):
+        global _captcha_cooldown_until
         self._paused = False
+        _captcha_cooldown_until = 0.0
         logger.info("Worker controller RESUMED")
 
     async def start(self):

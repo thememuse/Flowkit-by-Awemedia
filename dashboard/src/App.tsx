@@ -3,7 +3,7 @@ import { HashRouter, NavLink, Routes, Route, useLocation, useNavigate, useParams
 import { fetchAPI, postAPI } from './api/client'
 import {
   LayoutDashboard, FolderOpen, ScrollText, Film, Image as ImageIcon,
-  Globe, Settings, Zap, Clapperboard, Wifi, WifiOff, Plug, PlugZap, AudioWaveform
+  Globe, Settings, Zap, Clapperboard, Wifi, WifiOff, Plug, PlugZap, AudioWaveform, Clock
 } from 'lucide-react'
 import { useWebSocket } from './api/useWebSocket'
 import { useHealthStatus } from './api/useHealthStatus'
@@ -87,15 +87,17 @@ function Layout() {
   const { extensionConnected } = useHealthStatus()
   const [workerPaused, setWorkerPaused] = useState(false)
   const [activeRequestsCount, setActiveRequestsCount] = useState(0)
+  const [captchaCooldownUntil, setCaptchaCooldownUntil] = useState<string | null>(null)
 
   // Poll worker status
   useEffect(() => {
     if (!isConnected) return
     const interval = setInterval(async () => {
       try {
-        const res = await fetchAPI<{ paused: boolean; active_count: number }>('/api/requests/worker-status')
+        const res = await fetchAPI<{ paused: boolean; active_count: number; captcha_cooldown_until: string | null }>('/api/requests/worker-status')
         setWorkerPaused(res.paused)
         setActiveRequestsCount(res.active_count)
+        setCaptchaCooldownUntil(res.captcha_cooldown_until)
       } catch (err) {
         console.error(err)
       }
@@ -108,6 +110,7 @@ function Layout() {
       const endpoint = workerPaused ? '/api/requests/resume' : '/api/requests/pause'
       const res = await postAPI<{ paused: boolean }>(endpoint, {})
       setWorkerPaused(res.paused)
+      if (!res.paused) setCaptchaCooldownUntil(null)
     } catch (err) {
       alert('Không thể cập nhật trạng thái Agent: ' + err)
     }
@@ -317,6 +320,14 @@ function Layout() {
               {extensionConnected ? 'Extension OK' : 'Chưa kết nối'}
             </span>
           </div>
+          {captchaCooldownUntil && (
+            <div className="flex items-center gap-2">
+              <Clock size={13} color="var(--yellow)" />
+              <span style={{ fontSize: 12, color: 'var(--yellow)' }}>
+                Cooldown đến {new Date(captchaCooldownUntil).toLocaleTimeString()}
+              </span>
+            </div>
+          )}
 
           {isConnected && (
             <div className="flex flex-col gap-1.5 mt-2 pt-2" style={{ borderTop: '1px dashed var(--border-subtle)' }}>

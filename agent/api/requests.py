@@ -188,7 +188,8 @@ async def get_worker_status():
     controller = get_worker_controller()
     return {
         "paused": getattr(controller, "_paused", False),
-        "active_count": controller.active_count
+        "active_count": controller.active_count,
+        "captcha_cooldown_until": controller.captcha_cooldown_until,
     }
 
 
@@ -341,5 +342,4 @@ async def resume_worker():
     controller = get_worker_controller()
     controller.resume()
     return {"status": "success", "paused": False}
-
 
