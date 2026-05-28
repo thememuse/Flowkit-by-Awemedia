@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { HashRouter, NavLink, Routes, Route, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { fetchAPI, postAPI } from './api/client'
 import {
   LayoutDashboard, FolderOpen, ScrollText, Film, Image as ImageIcon,
   Globe, Settings, Zap, Clapperboard, Wifi, WifiOff, Plug, PlugZap, AudioWaveform
@@ -84,6 +85,43 @@ function StudioPageWrapper() {
 function Layout() {
   const { isConnected } = useWebSocket()
   const { extensionConnected } = useHealthStatus()
+  const [workerPaused, setWorkerPaused] = useState(false)
+  const [activeRequestsCount, setActiveRequestsCount] = useState(0)
+
+  // Poll worker status
+  useEffect(() => {
+    if (!isConnected) return
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetchAPI<{ paused: boolean; active_count: number }>('/api/requests/worker-status')
+        setWorkerPaused(res.paused)
+        setActiveRequestsCount(res.active_count)
+      } catch (err) {
+        console.error(err)
+      }
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [isConnected])
+
+  const handlePauseResume = async () => {
+    try {
+      const endpoint = workerPaused ? '/api/requests/resume' : '/api/requests/pause'
+      const res = await postAPI<{ paused: boolean }>(endpoint, {})
+      setWorkerPaused(res.paused)
+    } catch (err) {
+      alert('Không thể cập nhật trạng thái Agent: ' + err)
+    }
+  }
+
+  const handleCancelAll = async () => {
+    if (!confirm('Bạn có chắc chắn muốn DỪNG TẤT CẢ các tiến trình đang chạy không?')) return
+    try {
+      const res = await postAPI<{ cancelled_count: number }>('/api/requests/cancel-all', {})
+      alert(`Đã dừng và hủy thành công ${res.cancelled_count} tiến trình!`)
+    } catch (err) {
+      alert('Không thể dừng tiến trình: ' + err)
+    }
+  }
 
   return (
     <div className="flex h-screen overflow-hidden" style={{ background: 'var(--bg)', color: 'var(--text)' }}>
@@ -279,6 +317,37 @@ function Layout() {
               {extensionConnected ? 'Extension OK' : 'Chưa kết nối'}
             </span>
           </div>
+
+          {isConnected && (
+            <div className="flex flex-col gap-1.5 mt-2 pt-2" style={{ borderTop: '1px dashed var(--border-subtle)' }}>
+              <button
+                onClick={handlePauseResume}
+                className="flex items-center justify-center gap-1.5 px-2 py-1 rounded text-xs transition-all font-medium"
+                style={{
+                  background: workerPaused ? 'rgba(34,197,94,0.15)' : 'rgba(245,158,11,0.15)',
+                  color: workerPaused ? 'var(--green)' : 'var(--yellow)',
+                  border: `1px solid ${workerPaused ? 'rgba(34,197,94,0.3)' : 'rgba(245,158,11,0.3)'}`,
+                  cursor: 'pointer'
+                }}
+              >
+                <Zap size={11} className={workerPaused ? '' : 'animate-pulse'} />
+                {workerPaused ? 'Tiếp tục chạy' : 'Tạm dừng Agent'}
+              </button>
+              <button
+                onClick={handleCancelAll}
+                className="flex items-center justify-center gap-1.5 px-2 py-1 rounded text-xs transition-all font-medium"
+                style={{
+                  background: 'rgba(239,68,68,0.15)',
+                  color: 'var(--red)',
+                  border: '1px solid rgba(239,68,68,0.3)',
+                  cursor: 'pointer'
+                }}
+              >
+                <WifiOff size={11} />
+                Dừng tất cả ({activeRequestsCount})
+              </button>
+            </div>
+          )}
         </div>
       </aside>
 

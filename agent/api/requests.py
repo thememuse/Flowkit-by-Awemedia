@@ -238,3 +238,71 @@ async def cancel_active(scene_id: str, type: str, orientation: Optional[str] = "
         await crud.update_scene(scene_id, **updates)
         
     return {"status": "success", "message": f"Cancelled {len(active)} request(s) for scene {scene_id[:8]}"}
+
+
+@router.post("/cancel-all")
+async def cancel_all():
+    """Cancel all active (PENDING and PROCESSING) requests globally."""
+    from agent.utils.cancel_registry import cancel_request
+    from agent.services.event_bus import event_bus
+    
+    # 1. Fetch all active requests
+    pending = await crud.list_requests(status="PENDING")
+    processing = await crud.list_requests(status="PROCESSING")
+    active = pending + processing
+    
+    # 2. Cancel each active request
+    for r in active:
+        rid = r["id"]
+        await crud.update_request(rid, status="FAILED", error_message="Cancelled by user")
+        cancel_request(rid)
+        await event_bus.emit("request_update", {"id": rid, "status": "FAILED", "error": "Cancelled by user"})
+        
+        # 3. Update the corresponding scene status to FAILED
+        scene_id = r.get("scene_id")
+        req_type = r.get("type")
+        orientation = r.get("orientation") or "VERTICAL"
+        prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
+        
+        if scene_id:
+            updates = {}
+            if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "EDIT_IMAGE"):
+                updates[f"{prefix}_image_status"] = "FAILED"
+            elif req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS"):
+                updates[f"{prefix}_video_status"] = "FAILED"
+            elif req_type == "UPSCALE_VIDEO":
+                updates[f"{prefix}_upscale_status"] = "FAILED"
+            if updates:
+                await crud.update_scene(scene_id, **updates)
+                
+    return {"status": "success", "cancelled_count": len(active)}
+
+
+@router.post("/pause")
+async def pause_worker():
+    """Pause the background worker loop from processing new requests."""
+    from agent.worker.processor import get_worker_controller
+    controller = get_worker_controller()
+    controller.pause()
+    return {"status": "success", "paused": True}
+
+
+@router.post("/resume")
+async def resume_worker():
+    """Resume the background worker loop to process pending requests."""
+    from agent.worker.processor import get_worker_controller
+    controller = get_worker_controller()
+    controller.resume()
+    return {"status": "success", "paused": False}
+
+
+@router.get("/worker-status")
+async def get_worker_status():
+    """Get the current paused/active status of the worker."""
+    from agent.worker.processor import get_worker_controller
+    controller = get_worker_controller()
+    return {
+        "paused": getattr(controller, "_paused", False),
+        "active_count": controller.active_count
+    }
+

@@ -63,11 +63,24 @@ class WorkerController:
         self._rate_limiter = APIRateLimiter(MAX_CONCURRENT_REQUESTS, API_COOLDOWN)
         self._deferred: dict[str, float] = {}  # rid -> defer_until timestamp
         self._retry_after: dict[str, float] = {}  # rid -> retry_after timestamp
+        self._paused = False
 
     @property
     def active_count(self) -> int:
         """Number of currently active requests."""
         return len(self._active_ids)
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def pause(self):
+        self._paused = True
+        logger.info("Worker controller PAUSED")
+
+    def resume(self):
+        self._paused = False
+        logger.info("Worker controller RESUMED")
 
     async def start(self):
         """Start the worker loop."""
@@ -104,6 +117,10 @@ class WorkerController:
 
         while not self._shutdown.is_set():
             try:
+                if self._paused:
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+
                 if not client.connected:
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
