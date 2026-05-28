@@ -32,10 +32,13 @@ asarUnpack:
   - "**/node_modules/playwright/**"
   - "**/node_modules/playwright-core/**"
 
-# Extra resources (Python agent binary)
 extraResources:
   - from: resources/
     to: resources/
+    filter:
+      - "**/*"
+  - from: extension/
+    to: resources/extension/
     filter:
       - "**/*"
 
