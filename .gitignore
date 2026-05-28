@@ -27,3 +27,6 @@ resources/agent-linux/
 
 # OS metadata
 .DS_Store
+
+# PyInstaller Spec
+*.spec
