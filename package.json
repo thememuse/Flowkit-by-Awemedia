@@ -1,6 +1,6 @@
 {
   "name": "flowkit",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "Flow Kit — AI Video Production Desktop App",
   "main": "electron/main.js",
   "author": {

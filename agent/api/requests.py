@@ -181,6 +181,17 @@ async def batch_status(video_id: str = None, project_id: str = None,
     )
 
 
+@router.get("/worker-status")
+async def get_worker_status():
+    """Get the current paused/active status of the worker."""
+    from agent.worker.processor import get_worker_controller
+    controller = get_worker_controller()
+    return {
+        "paused": getattr(controller, "_paused", False),
+        "active_count": controller.active_count
+    }
+
+
 @router.get("/{rid}", response_model=Request)
 async def get(rid: str):
     r = await crud.get_request(rid)
@@ -331,14 +342,4 @@ async def resume_worker():
     controller.resume()
     return {"status": "success", "paused": False}
 
-
-@router.get("/worker-status")
-async def get_worker_status():
-    """Get the current paused/active status of the worker."""
-    from agent.worker.processor import get_worker_controller
-    controller = get_worker_controller()
-    return {
-        "paused": getattr(controller, "_paused", False),
-        "active_count": controller.active_count
-    }
 

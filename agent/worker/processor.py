@@ -8,6 +8,7 @@ import base64
 import json
 import logging
 import time
+from datetime import datetime, timezone
 
 import aiohttp
 
@@ -20,6 +21,7 @@ from agent.worker._parsing import _is_error
 from agent.sdk.services.result_handler import parse_result, apply_scene_result, apply_character_result
 
 logger = logging.getLogger(__name__)
+_captcha_cooldown_until = 0.0
 
 _API_CALL_TYPES = {"GENERATE_IMAGE", "REGENERATE_IMAGE", "EDIT_IMAGE",
                    "GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS", "UPSCALE_VIDEO",
@@ -137,6 +139,16 @@ class WorkerController:
                     continue
 
                 now = time.time()
+                if _captcha_cooldown_until > now:
+                    await event_bus.emit("worker_tick", {
+                        "active": len(self._active_ids),
+                        "slots": 0,
+                        "pending": 0,
+                        "captcha_cooldown_until": _iso_from_epoch(_captcha_cooldown_until),
+                    })
+                    await asyncio.sleep(min(POLL_INTERVAL, max(1, _captcha_cooldown_until - now)))
+                    continue
+
                 # Read dynamically from config module so settings changes take effect without restart
                 max_concurrent = _config.MAX_CONCURRENT_REQUESTS
                 slots_available = max_concurrent - len(self._active_ids)
@@ -213,6 +225,15 @@ class WorkerController:
             self._active_ids.discard(rid)
             if is_video:
                 self._active_video_ids.discard(rid)
+
+
+def _iso_from_epoch(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _retry_at_after(delay_seconds: float) -> tuple[float, str]:
+    epoch = time.time() + delay_seconds
+    return epoch, _iso_from_epoch(epoch)
 
 
 async def _prerequisites_met(req: dict, orientation: str) -> bool:
@@ -308,7 +329,7 @@ async def _process_one(req: dict, deferred: dict = None, retry_after: dict = Non
         return
 
     logger.info("Processing request %s type=%s", rid[:8], req_type)
-    await crud.update_request(rid, status="PROCESSING")
+    await crud.update_request(rid, status="PROCESSING", next_retry_at=None)
     await event_bus.emit("request_update", {"id": rid, "status": "PROCESSING", "type": req_type})
 
     try:
@@ -455,6 +476,7 @@ async def _recover_entity_not_found(req: dict) -> bool:
 
 
 async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict = None):
+    global _captcha_cooldown_until
     error_msg = result.get("error")
     if not error_msg:
         data = result.get("data", {})
@@ -503,19 +525,37 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
         logger.info("Request %s transient WS error, will retry (no retry increment): %s", rid[:8], error_msg)
         return
 
-    # reCAPTCHA errors: retry up to 10 times with incremental backoff + randomized jitter to let Google trust score recover
+    # reCAPTCHA errors: retry up to 10 times with durable backoff. Unusual activity
+    # is a session/IP trust signal, so use a longer global cooldown instead of
+    # immediately burning every pending request.
     if "captcha" in error_lower or "recaptcha" in error_lower:
         retry = req.get("retry_count", 0) + 1
         if retry < 10:
-            await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))
-            if retry_after is not None:
-                import random
-                # Base 30s + extra 10s per retry + 1-15s randomized jitter to prevent synchronous thundering herd retries
-                delay = 30 + (retry * 10) + random.randint(1, 15)
-                retry_after[rid] = time.time() + delay
-                logger.warning("Request %s reCAPTCHA failed (retry %d/10), will retry in %ds: %s", rid[:8], retry, delay, error_msg)
+            import random
+            if "public_error_unusual_activity" in error_lower or "unusual_activity" in error_lower:
+                delay = min(900 * retry, 3600) + random.randint(30, 120)
+                retry_epoch, next_retry_at = _retry_at_after(delay)
+                _captcha_cooldown_until = max(_captcha_cooldown_until, retry_epoch)
+                await event_bus.emit("worker_tick", {
+                    "active": 0,
+                    "slots": 0,
+                    "pending": 0,
+                    "captcha_cooldown_until": next_retry_at,
+                    "error": str(error_msg),
+                })
             else:
-                logger.warning("Request %s reCAPTCHA failed (retry %d/10), will retry: %s", rid[:8], retry, error_msg)
+                delay = 30 + (retry * 10) + random.randint(1, 15)
+                retry_epoch, next_retry_at = _retry_at_after(delay)
+            await crud.update_request(
+                rid,
+                status="PENDING",
+                retry_count=retry,
+                next_retry_at=next_retry_at,
+                error_message=str(error_msg),
+            )
+            if retry_after is not None:
+                retry_after[rid] = retry_epoch
+            logger.warning("Request %s reCAPTCHA failed (retry %d/10), will retry at %s: %s", rid[:8], retry, next_retry_at, error_msg)
             return
         else:
             await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
@@ -526,14 +566,16 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
     retry = req.get("retry_count", 0) + 1
     if retry < MAX_RETRIES:
         now = time.time()
+        delay = min(2 ** retry * 10, 300)
+        retry_epoch, next_retry_at = _retry_at_after(delay)
         if retry_after is not None:
             ra = retry_after.get(rid, 0.0)
             if ra > now:
                 # Still in backoff — reset to PENDING so it's not stuck in PROCESSING
                 await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
                 return
-            retry_after[rid] = now + min(2 ** retry * 10, 300)
-        await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))
+            retry_after[rid] = retry_epoch
+        await crud.update_request(rid, status="PENDING", retry_count=retry, next_retry_at=next_retry_at, error_message=str(error_msg))
         logger.warning("Request %s failed (retry %d/%d): %s", rid[:8], retry, MAX_RETRIES, error_msg)
     else:
         await crud.update_request(rid, status="FAILED", error_message=str(error_msg))

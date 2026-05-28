@@ -139,8 +139,7 @@ class TestHandleFailure:
         rid = req["id"]
         result = {"error": "timeout"}
 
-        with patch("agent.worker.processor.crud") as mock_crud, \
-             patch("agent.worker.processor._retry_state", {}):
+        with patch("agent.worker.processor.crud") as mock_crud:
             mock_crud.update_request = AsyncMock()
             mock_crud.update_scene = AsyncMock()
             await _handle_failure(rid, req, result)
@@ -150,6 +149,7 @@ class TestHandleFailure:
         assert call_kwargs[0][0] == rid
         assert call_kwargs[1]["status"] == "PENDING"
         assert call_kwargs[1]["retry_count"] == 1
+        assert call_kwargs[1]["next_retry_at"]
 
     @pytest.mark.asyncio
     async def test_marks_failed_when_at_max_retries(self):
@@ -158,8 +158,7 @@ class TestHandleFailure:
         rid = req["id"]
         result = {"error": "permanent failure"}
 
-        with patch("agent.worker.processor.crud") as mock_crud, \
-             patch("agent.worker.processor._retry_state", {}):
+        with patch("agent.worker.processor.crud") as mock_crud:
             mock_crud.update_request = AsyncMock()
             mock_crud.update_scene = AsyncMock()
             await _handle_failure(rid, req, result)
@@ -185,11 +184,35 @@ class TestHandleFailure:
             }
         }
 
-        with patch("agent.worker.processor.crud") as mock_crud, \
-             patch("agent.worker.processor._retry_state", {}):
+        with patch("agent.worker.processor.crud") as mock_crud:
             mock_crud.update_request = AsyncMock()
             mock_crud.update_scene = AsyncMock()
             await _handle_failure(rid, req, result)
 
         call_kwargs = mock_crud.update_request.call_args
         assert "caller does not have permission" in call_kwargs[1]["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_recaptcha_unusual_activity_sets_durable_backoff(self):
+        req = make_req(req_type="GENERATE_VIDEO", retry_count=1)
+        rid = req["id"]
+        result = {
+            "data": {
+                "error": {
+                    "code": 403,
+                    "message": "reCAPTCHA evaluation failed",
+                    "details": [{"reason": "PUBLIC_ERROR_UNUSUAL_ACTIVITY"}],
+                }
+            }
+        }
+
+        with patch("agent.worker.processor.crud") as mock_crud, \
+             patch("agent.worker.processor.event_bus") as mock_bus:
+            mock_crud.update_request = AsyncMock()
+            mock_bus.emit = AsyncMock()
+            await _handle_failure(rid, req, result, retry_after={})
+
+        call_kwargs = mock_crud.update_request.call_args
+        assert call_kwargs[1]["status"] == "PENDING"
+        assert call_kwargs[1]["retry_count"] == 2
+        assert call_kwargs[1]["next_retry_at"]
