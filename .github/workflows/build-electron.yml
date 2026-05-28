@@ -56,19 +56,10 @@ jobs:
           chmod +x build/build-python.sh
           bash build/build-python.sh
 
-      - name: Build macOS App (x64)
+      - name: Build macOS App (arm64 & x64)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          hdiutil detach "/Volumes/Flow Kit" 2>/dev/null || true
-          npx electron-builder --mac --x64 --publish never
-
-      - name: Build macOS App (arm64)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          hdiutil detach "/Volumes/Flow Kit" 2>/dev/null || true
-          npx electron-builder --mac --arm64 --publish never
+        run: npx electron-builder --mac --arm64 --x64 --publish never
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
