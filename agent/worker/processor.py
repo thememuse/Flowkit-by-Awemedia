@@ -14,6 +14,7 @@ import aiohttp
 from agent.db import crud
 from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
+from agent import config as _config
 from agent.config import POLL_INTERVAL, MAX_RETRIES, API_COOLDOWN, MAX_CONCURRENT_REQUESTS
 from agent.worker._parsing import _is_error
 from agent.sdk.services.result_handler import parse_result, apply_scene_result, apply_character_result
@@ -108,7 +109,9 @@ class WorkerController:
                     continue
 
                 now = time.time()
-                slots_available = MAX_CONCURRENT_REQUESTS - len(self._active_ids)
+                # Read dynamically from config module so settings changes take effect without restart
+                max_concurrent = _config.MAX_CONCURRENT_REQUESTS
+                slots_available = max_concurrent - len(self._active_ids)
                 if slots_available <= 0:
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
@@ -443,6 +446,16 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
             return
 
     error_lower = str(error_msg).lower()
+
+    # Workflow polling timeout (soft timeout — video still generating on Google's servers)
+    # Do NOT increment retry_count or resubmit. Just re-queue PENDING so worker resumes polling.
+    if result.get("_workflow_timeout"):
+        await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
+        logger.info(
+            "Request %s workflow polling timeout — re-queuing PENDING to resume polling (no retry increment)",
+            rid[:8]
+        )
+        return
 
     # WS transient errors (extension disconnect/reconnect): retry without incrementing count
     if "extension reconnected" in error_lower or "extension disconnected" in error_lower or "extension not connected" in error_lower:

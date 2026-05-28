@@ -198,6 +198,8 @@ function connectToAgent() {
         await handleApiRequest(msg);
       } else if (msg.method === 'trpc_request') {
         await handleTrpcRequest(msg);
+      } else if (msg.method === 'download_asset') {
+        await handleDownloadAsset(msg);
       } else if (msg.method === 'solve_captcha') {
         await handleSolveCaptcha(msg);
       } else if (msg.method === 'get_status') {
@@ -510,6 +512,42 @@ async function handleApiRequest(msg) {
 
   chrome.storage.local.set({ metrics });
   setState('idle');
+}
+
+async function handleDownloadAsset(msg) {
+  const { id, params } = msg;
+  const { url } = params;
+  if (!url) {
+    sendToAgent({ id, error: 'MISSING_URL' });
+    return;
+  }
+
+  setState('running');
+  try {
+    console.log('[FlowAgent] Extension downloading asset:', url.slice(0, 100));
+    const response = await fetch(url, {
+      method: 'GET',
+      credentials: 'include',
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP_${response.status}`);
+    }
+    const blob = await response.blob();
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64data = reader.result.split(',')[1];
+      sendToAgent({ id, data: { base64: base64data } });
+    };
+    reader.onerror = (e) => {
+      sendToAgent({ id, error: `FileReader error: ${e}` });
+    };
+    reader.readAsDataURL(blob);
+  } catch (e) {
+    console.error('[FlowAgent] Extension asset download failed:', e);
+    sendToAgent({ id, error: e.message || 'DOWNLOAD_FAILED' });
+  } finally {
+    setState('idle');
+  }
 }
 
 // ─── State & Popup ──────────────────────────────────────────

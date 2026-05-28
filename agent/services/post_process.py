@@ -151,3 +151,36 @@ def add_music(video_path: str, music_path: str, output_path: str,
         logger.error("Add music failed: %s", result.stderr[-200:])
         return False
     return True
+
+
+def upscale_video_offline(input_path: str, output_path: str, method: str = "local_ffmpeg", request_id: str = "") -> bool:
+    """Upscale video offline using either dynamic local AI (Real-ESRGAN) or fast FFmpeg filter."""
+    if not Path(input_path).exists():
+        logger.error("upscale_video_offline: input file not found: %s", input_path)
+        return False
+
+    if method == "local_ai":
+        from agent.services.upscaler import LocalAIUpscaler
+        try:
+            upscaler = LocalAIUpscaler()
+            return upscaler.upscale(input_path, output_path, request_id=request_id)
+        except Exception as e:
+            logger.error("Failed to run local AI upscaler: %s. Falling back to FFmpeg Lanczos...", e)
+            # Fall through to local_ffmpeg Lanczos
+
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-vf", "scale=iw*2:-1:flags=lanczos,unsharp=5:5:1.2:5:5:0.0",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+
+    logger.info("Running offline Lanczos upscale: %s -> %s", input_path, output_path)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if result.returncode != 0:
+        logger.error("Offline Lanczos upscale failed: %s", result.stderr[-200:])
+        return False
+    return True
+

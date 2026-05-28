@@ -11,18 +11,19 @@ MATERIALS: dict[str, dict] = {
         "id": "realistic",
         "name": "Photorealistic",
         "style_instruction": (
-            "Photorealistic RAW photograph, shot on Canon EOS R5, 35mm lens, "
-            "natural available light, real footage."
+            "Ultra-photorealistic style, true-to-life colors and textures, "
+            "cinematic depth of field, natural lighting, fine surface detail. "
+            "Hyper-realistic render quality, lifelike."
         ),
         "negative_prompt": (
             "NOT 3D render, NOT CGI, NOT digital art, NOT illustration, "
             "NOT anime, NOT painting, NOT cartoon."
         ),
         "scene_prefix": (
-            "Real RAW photograph, shot on Canon EOS R5, 35mm lens, "
-            "natural available light."
+            "Ultra-photorealistic scene, true-to-life textures, "
+            "natural lighting, cinematic depth of field."
         ),
-        "lighting": "Studio lighting, highly detailed",
+        "lighting": "Natural cinematic lighting, highly detailed",
     },
     "3d_pixar": {
         "id": "3d_pixar",

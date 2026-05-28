@@ -17,6 +17,7 @@ export interface Project {
   status: ProjectStatus
   user_paygate_tier: string | null
   material: string
+  flow_synced: boolean   // true = project exists on Google Flow
   narrator_voice: string | null
   narrator_ref_audio: string | null
   created_at: string
@@ -43,11 +44,15 @@ export interface Video {
   description: string | null
   display_order: number
   status: string
+  orientation: Orientation | null
   vertical_url: string | null
   horizontal_url: string | null
   thumbnail_url: string | null
   duration: number | null
   resolution: string | null
+  youtube_id: string | null
+  privacy: string
+  tags: string | null
   created_at: string
   updated_at: string
 }

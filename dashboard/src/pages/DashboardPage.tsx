@@ -48,7 +48,7 @@ export default function DashboardPage() {
           className="px-2 py-1.5 rounded text-xs"
           style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--text)', minWidth: '180px' }}
         >
-          <option value="">Select project…</option>
+          <option value="">Chọn dự án...</option>
           {projects.map(p => (
             <option key={p.id} value={p.id}>{p.name}</option>
           ))}
@@ -61,7 +61,7 @@ export default function DashboardPage() {
           className="px-2 py-1.5 rounded text-xs"
           style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--text)', minWidth: '180px' }}
         >
-          <option value="">Select video…</option>
+          <option value="">Chọn video...</option>
           {videos.map(v => (
             <option key={v.id} value={v.id}>{v.title}</option>
           ))}
@@ -73,7 +73,7 @@ export default function DashboardPage() {
         <PipelineView projectId={selectedProject} videoId={selectedVideo} />
       ) : (
         <div className="flex items-center justify-center flex-1" style={{ color: 'var(--muted)' }}>
-          Select a project and video to view the pipeline
+          Chọn dự án và video để xem pipeline sản xuất
         </div>
       )}
     </div>

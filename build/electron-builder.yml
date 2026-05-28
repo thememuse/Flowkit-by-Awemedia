@@ -1,0 +1,106 @@
+appId: com.flowkit.app
+productName: Flow Kit
+copyright: Copyright © 2024 Flow Kit
+
+# Output directory
+directories:
+  output: dist-electron
+  buildResources: build/resources
+
+# Files to include in packaged app
+files:
+  - electron/**
+  - "!electron/**/*.map"
+  - dashboard/dist/**
+  - build/resources/**
+  - package.json
+  - node_modules/**
+  - "!node_modules/.cache/**"
+  - "!node_modules/**/*.md"
+  - "!node_modules/**/*.map"
+  - "!node_modules/**/test/**"
+  - "!node_modules/**/tests/**"
+  - "!node_modules/**/__tests__/**"
+  - "!node_modules/**/docs/**"
+  - "!node_modules/**/example/**"
+  - "!node_modules/**/examples/**"
+  # Exclude large unused playwright browser binaries (downloaded on first run)
+  - "!node_modules/playwright-core/.local-browsers/**"
+
+# Extra resources (Python agent binary)
+extraResources:
+  - from: resources/
+    to: resources/
+    filter:
+      - "**/*"
+
+# macOS
+mac:
+  category: public.app-category.productivity
+  icon: build/resources/icon.icns
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: false
+
+dmg:
+  title: Flow Kit
+  icon: build/resources/icon.icns
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+# Windows
+win:
+  icon: build/resources/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  certificateSubjectName: Flow Kit
+  signingHashAlgorithms:
+    - sha256
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  installerIcon: build/resources/icon.ico
+  uninstallerIcon: build/resources/icon.ico
+  installerHeaderIcon: build/resources/icon.ico
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Flow Kit
+  runAfterFinish: true
+  include: build/installer.nsh
+
+# Linux (bonus)
+linux:
+  icon: build/resources/icon.png
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  category: Utility
+
+# Auto-update
+publish:
+  provider: github
+  releaseType: release

@@ -86,6 +86,21 @@ async def create(body: MaterialCreateRequest):
     return _to_response(material, is_builtin=False)
 
 
+@router.patch("/{material_id}", response_model=MaterialResponse)
+async def update(material_id: str, body: dict):
+    """Update a material (built-in or custom) in-memory. Changes persist until server restart for built-ins."""
+    material = get_material(material_id)
+    if not material:
+        raise HTTPException(404, f"Material '{material_id}' not found")
+    # Update allowed fields in-place
+    for field in ["name", "style_instruction", "negative_prompt", "scene_prefix", "lighting"]:
+        if field in body:
+            MATERIALS[material_id][field] = body[field]
+    logger.info("Material updated in-memory: %s", material_id)
+    is_builtin = material_id in _BUILTIN_IDS
+    return _to_response(MATERIALS[material_id], is_builtin=is_builtin)
+
+
 @router.delete("/{material_id}")
 async def delete(material_id: str):
     """Delete a custom material. Built-in materials cannot be deleted."""

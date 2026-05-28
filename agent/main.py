@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 import websockets
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT
 from agent.db.schema import init_db, close_db
@@ -23,6 +24,12 @@ from agent.api.materials import router as materials_router
 from agent.api.music import router as music_router
 from agent.api.models import router as models_router
 from agent.api.active_project import router as active_project_router
+from agent.api.settings import router as settings_router, get_settings, _apply_to_env
+from agent.api.skills import router as skills_router
+from agent.api.ai_generate import router as ai_router
+from agent.api.auto_pipeline import router as auto_pipeline_router
+from agent.api.download import router as download_router
+from agent.api.elevenlabs_tts import router as elevenlabs_tts_router
 from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
 from agent.services.event_bus import event_bus
@@ -86,6 +93,15 @@ async def lifespan(app: FastAPI):
 
     ops = init_sdk(get_flow_client())
     logger.info("SDK initialized (OperationService ready)")
+
+    # Apply saved settings (hot-reload API keys etc.)
+    try:
+        saved = get_settings()
+        _apply_to_env(saved)
+        logger.info("Settings loaded from file")
+    except Exception as e:
+        logger.warning("Could not load settings: %s", e)
+
     logger.info("Flow Kit starting on %s:%d", API_HOST, API_PORT)
 
     controller = get_worker_controller()
@@ -130,6 +146,20 @@ app.include_router(materials_router, prefix="/api")
 app.include_router(music_router, prefix="/api")
 app.include_router(models_router)
 app.include_router(active_project_router)
+app.include_router(settings_router, prefix="/api")
+app.include_router(skills_router, prefix="/api")
+app.include_router(ai_router, prefix="/api")
+app.include_router(auto_pipeline_router, prefix="/api")
+app.include_router(download_router, prefix="/api")
+app.include_router(elevenlabs_tts_router, prefix="/api")
+
+# Serve locally-saved workflow videos (file:// → HTTP)
+# Workflow videos are saved to OUTPUT_DIR/_workflow_videos/
+from agent.config import OUTPUT_DIR
+import os as _os
+_output_dir = str(OUTPUT_DIR)
+_os.makedirs(_output_dir, exist_ok=True)
+app.mount("/media", StaticFiles(directory=_output_dir), name="media")
 
 
 import secrets as _secrets
@@ -177,10 +207,11 @@ async def health():
 @app.websocket("/ws/dashboard")
 async def dashboard_ws(websocket: WebSocket):
     """WebSocket endpoint for dashboard clients (Chrome extension side panel)."""
-    # Reject cross-origin connections (only allow localhost)
+    # Reject cross-origin connections (only allow localhost + Electron)
     origin = (websocket.headers.get("origin") or "").lower()
     if origin and not any(origin.startswith(p) for p in (
         "http://127.0.0.1", "http://localhost", "chrome-extension://",
+        "file://",  # Electron production mode (file:// origin)
     )):
         await websocket.close(code=4003, reason="Origin not allowed")
         return

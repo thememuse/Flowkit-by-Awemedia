@@ -161,21 +161,48 @@ class FlowClient:
             scenes = await crud.list_scenes_by_media_id(media_id)
             for scene in scenes:
                 updates = {}
-                if media_type == "image":
-                    # Update whichever orientation matches
-                    if scene.get("vertical_image_media_id") == media_id:
-                        updates["vertical_image_url"] = url
-                    if scene.get("horizontal_image_media_id") == media_id:
-                        updates["horizontal_image_url"] = url
-                elif media_type == "video":
-                    if scene.get("vertical_video_media_id") == media_id:
-                        updates["vertical_video_url"] = url
-                    if scene.get("horizontal_video_media_id") == media_id:
-                        updates["horizontal_video_url"] = url
-                    if scene.get("vertical_upscale_media_id") == media_id:
-                        updates["vertical_upscale_url"] = url
-                    if scene.get("horizontal_upscale_media_id") == media_id:
-                        updates["horizontal_upscale_url"] = url
+                try:
+                    video = await crud.get_video(scene["video_id"])
+                    if video:
+                        project = await crud.get_project(video["project_id"])
+                        if project:
+                            from agent.utils.slugify import slugify
+                            from agent.config import OUTPUT_DIR
+                            from agent.sdk.services.result_handler import download_to_local_if_needed
+                            project_slug = slugify(project["name"])
+                            display_order = scene.get("display_order")
+                            if display_order is None:
+                                display_order = 0
+
+                            if media_type == "image":
+                                if scene.get("vertical_image_media_id") == media_id:
+                                    dest = OUTPUT_DIR / project_slug / "scenes" / f"scene_{display_order:03d}_{scene['id']}.jpg"
+                                    local_url = await download_to_local_if_needed(url, dest, media_id=media_id)
+                                    updates["vertical_image_url"] = local_url
+                                if scene.get("horizontal_image_media_id") == media_id:
+                                    dest = OUTPUT_DIR / project_slug / "scenes" / f"scene_{display_order:03d}_{scene['id']}.jpg"
+                                    local_url = await download_to_local_if_needed(url, dest, media_id=media_id)
+                                    updates["horizontal_image_url"] = local_url
+                            elif media_type == "video":
+                                if scene.get("vertical_video_media_id") == media_id:
+                                    dest = OUTPUT_DIR / project_slug / "scenes" / f"scene_{display_order:03d}_{scene['id']}.mp4"
+                                    local_url = await download_to_local_if_needed(url, dest, media_id=media_id)
+                                    updates["vertical_video_url"] = local_url
+                                if scene.get("horizontal_video_media_id") == media_id:
+                                    dest = OUTPUT_DIR / project_slug / "scenes" / f"scene_{display_order:03d}_{scene['id']}.mp4"
+                                    local_url = await download_to_local_if_needed(url, dest, media_id=media_id)
+                                    updates["horizontal_video_url"] = local_url
+                                if scene.get("vertical_upscale_media_id") == media_id:
+                                    dest = OUTPUT_DIR / project_slug / "4k" / f"scene_{display_order:03d}_{scene['id']}.mp4"
+                                    local_url = await download_to_local_if_needed(url, dest, media_id=media_id)
+                                    updates["vertical_upscale_url"] = local_url
+                                if scene.get("horizontal_upscale_media_id") == media_id:
+                                    dest = OUTPUT_DIR / project_slug / "4k" / f"scene_{display_order:03d}_{scene['id']}.mp4"
+                                    local_url = await download_to_local_if_needed(url, dest, media_id=media_id)
+                                    updates["horizontal_upscale_url"] = local_url
+                except Exception as ex:
+                    logger.exception("Failed to resolve paths or download sync scene media: %s", ex)
+
                 if updates:
                     await crud.update_scene(scene["id"], **updates)
                     updated += 1
@@ -184,7 +211,18 @@ class FlowClient:
             chars = await crud.list_characters_by_media_id(media_id)
             for char in chars:
                 if media_type == "image" and char.get("media_id") == media_id:
-                    await crud.update_character(char["id"], reference_image_url=url)
+                    local_url = url
+                    try:
+                        from agent.utils.slugify import slugify
+                        from agent.config import OUTPUT_DIR
+                        from agent.sdk.services.result_handler import download_to_local_if_needed
+                        char_slug = slugify(char["name"])
+                        dest = OUTPUT_DIR / "_shared" / "characters" / f"{char_slug}_{char['id']}.jpg"
+                        local_url = await download_to_local_if_needed(url, dest)
+                    except Exception as ex:
+                        logger.exception("Failed to download sync character media: %s", ex)
+
+                    await crud.update_character(char["id"], reference_image_url=local_url)
                     updated += 1
 
         if updated:
@@ -535,6 +573,12 @@ class FlowClient:
             "method": "GET",
             "headers": random_headers(),
         }, timeout=15)
+
+    async def download_asset(self, url: str) -> dict:
+        """Fetch/download an asset URL inside Chrome's browser context (for cookie/residential IP auth)
+        and return the base64 encoded bytes.
+        """
+        return await self._send("download_asset", {"url": url}, timeout=60)
 
     async def upload_image(self, image_base64: str, mime_type: str = "image/jpeg",
                             project_id: str = "", file_name: str = "image.jpg") -> dict:

@@ -1,0 +1,13 @@
+# Electron app build output
+dist-electron/
+node_modules/
+
+# Python build artifacts
+build-pyinstaller/
+build/*.spec
+resources/agent-mac/
+resources/agent-win/
+resources/agent-linux/
+
+# Keep the resources directory
+!resources/.gitkeep

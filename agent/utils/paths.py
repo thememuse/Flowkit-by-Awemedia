@@ -9,9 +9,10 @@ def project_dir(project_slug: str) -> Path:
     return OUTPUT_DIR / project_slug
 
 
-def scene_filename(display_order: int, scene_id: str, ext: str = "mp4") -> str:
+def scene_filename(display_order: int | None, scene_id: str, ext: str = "mp4") -> str:
     """Return canonical scene filename: scene_NNN_<scene_id>.<ext>."""
-    return f"scene_{display_order:03d}_{scene_id}.{ext}"
+    order_val = display_order if display_order is not None else 0
+    return f"scene_{order_val:03d}_{scene_id}.{ext}"
 
 
 def scene_4k_path(project_slug: str, display_order: int, scene_id: str) -> Path:

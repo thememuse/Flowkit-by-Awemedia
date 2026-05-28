@@ -15,3 +15,15 @@ agent/active_project.json
 AGENTS.md
 GEMINI.md
 .fk-setup.json
+node_modules
+
+# Electron
+dist-electron/
+node_modules/
+build-pyinstaller/
+resources/agent-mac/
+resources/agent-win/
+resources/agent-linux/
+
+# OS metadata
+.DS_Store

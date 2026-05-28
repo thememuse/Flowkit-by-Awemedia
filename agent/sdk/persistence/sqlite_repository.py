@@ -34,6 +34,7 @@ class SQLiteRepository(Repository):
             material=row.get("material"),
             allow_music=bool(row.get("allow_music", 0)),
             allow_voice=bool(row.get("allow_voice", 0)),
+            flow_synced=bool(row.get("flow_synced", 0)),
             narrator_voice=row.get("narrator_voice"),
             narrator_ref_audio=row.get("narrator_ref_audio"),
             created_at=row.get("created_at"),
@@ -191,6 +192,7 @@ class SQLiteRepository(Repository):
             user_paygate_tier=project.user_paygate_tier,
             allow_music=int(project.allow_music),
             allow_voice=int(project.allow_voice),
+            flow_synced=int(project.flow_synced),
         )
 
     async def create_project(
@@ -205,22 +207,28 @@ class SQLiteRepository(Repository):
         material: Optional[str] = None,
         allow_music: bool = False,
         allow_voice: bool = False,
+        flow_synced: bool = False,
     ) -> Project:
         row = await crud.create_project(
+            id=id,
             name=name,
             description=description,
             story=story,
             language=language,
             user_paygate_tier=user_paygate_tier,
-            id=id,
             material=material,
             allow_music=allow_music,
             allow_voice=allow_voice,
+            flow_synced=flow_synced,
         )
         return self._row_to_project(row)
 
     async def delete_project(self, project_id: str) -> bool:
         return await crud.delete_project(project_id)
+
+    async def update_project(self, project_id: str, **kwargs: Any) -> Optional[Project]:
+        row = await crud.update_project(project_id, **kwargs)
+        return self._row_to_project(row) if row else None
 
     # ------------------------------------------------------------------
     # Typed Character methods

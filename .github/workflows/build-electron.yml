@@ -1,0 +1,140 @@
+name: Build Electron App
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to build'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - mac
+          - win
+
+jobs:
+  build-mac:
+    if: ${{ github.event.inputs.platform == 'mac' || github.event.inputs.platform == 'all' || startsWith(github.ref, 'refs/tags/') }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install Dashboard dependencies
+        run: cd dashboard && npm ci
+
+      - name: Build Dashboard
+        run: npm run build:renderer
+
+      - name: Build Python Agent Binary (macOS)
+        run: |
+          chmod +x build/build-python.sh
+          bash build/build-python.sh
+
+      - name: Build macOS App (arm64)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run dist:mac:arm
+
+      - name: Build macOS App (x64)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run dist:mac:x64
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-builds
+          path: |
+            dist-electron/*.dmg
+            dist-electron/*.zip
+          retention-days: 7
+
+  build-win:
+    if: ${{ github.event.inputs.platform == 'win' || github.event.inputs.platform == 'all' || startsWith(github.ref, 'refs/tags/') }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install Dashboard dependencies
+        run: cd dashboard && npm ci
+
+      - name: Build Dashboard
+        run: npm run build:renderer
+        env:
+          BUILD_TARGET: electron
+
+      - name: Build Python Agent Binary (Windows)
+        run: build\build-python.bat
+
+      - name: Build Windows App
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run dist:win
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-builds
+          path: |
+            dist-electron/*.exe
+            dist-electron/*.msi
+          retention-days: 7
+
+  release:
+    needs: [build-mac, build-win]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            macos-builds/*
+            windows-builds/*
+          draft: true
+          generate_release_notes: true

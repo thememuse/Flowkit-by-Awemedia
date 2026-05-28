@@ -184,7 +184,8 @@ async def narrate_video(vid: str, body: NarrateVideoRequest):
                 video_url_key = f"{orientation.lower()}_video_url"
                 video_path = scene_data.get(video_url_key)
                 if video_path and Path(video_path).exists():
-                    mixed_path = str(narrated_dir / f"scene_{r['display_order']:03d}_{r['scene_id']}_mixed.mp4")
+                    order_val = r['display_order'] if r['display_order'] is not None else 0
+                    mixed_path = str(narrated_dir / f"scene_{order_val:03d}_{r['scene_id']}_mixed.mp4")
                     ok = add_narration(
                         video_path=video_path,
                         narration_path=r["audio_path"],

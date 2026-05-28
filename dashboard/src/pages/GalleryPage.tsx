@@ -43,12 +43,15 @@ export default function GalleryPage() {
       .finally(() => setLoading(false))
   }, [selectedVideo])
 
+  const currentVideo = videos.find(v => v.id === selectedVideo)
+  const orientation = currentVideo?.orientation ?? 'VERTICAL'
+
   return (
     <div className="flex flex-col gap-4">
       {/* Filters */}
       <div className="flex gap-3 flex-wrap">
         <div className="flex flex-col gap-1">
-          <label className="text-xs" style={{ color: 'var(--muted)' }}>Project</label>
+          <label className="text-xs" style={{ color: 'var(--muted)' }}>Dự án</label>
           <select
             value={selectedProject}
             onChange={e => setSelectedProject(e.target.value)}
@@ -81,7 +84,7 @@ export default function GalleryPage() {
       {loading ? (
         <div className="text-xs" style={{ color: 'var(--muted)' }}>Loading scenes...</div>
       ) : (
-        <VideoGallery scenes={scenes} />
+        <VideoGallery scenes={scenes} orientation={orientation} />
       )}
     </div>
   )

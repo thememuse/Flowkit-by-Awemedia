@@ -111,13 +111,13 @@ async def list_characters() -> list[dict]:
 
 # ─── Project ────────────────────────────────────────────────
 
-async def create_project(name: str, description: str = None, story: str = None, language: str = "en", user_paygate_tier: str = "PAYGATE_TIER_ONE", id: str = None, material: str = None, allow_music: bool = False, allow_voice: bool = False) -> dict:
+async def create_project(name: str, description: str = None, story: str = None, language: str = "en", user_paygate_tier: str = "PAYGATE_TIER_ONE", id: str = None, material: str = None, allow_music: bool = False, allow_voice: bool = False, flow_synced: bool = False) -> dict:
     db = await get_db()
     pid, now = id or _uuid(), _now()
     async with _db_lock:
         await db.execute(
-            "INSERT INTO project (id,name,description,story,language,user_paygate_tier,material,allow_music,allow_voice,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (pid, name, description, story, language, user_paygate_tier, material, int(allow_music), int(allow_voice), now, now))
+            "INSERT INTO project (id,name,description,story,language,user_paygate_tier,material,allow_music,allow_voice,flow_synced,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (pid, name, description, story, language, user_paygate_tier, material, int(allow_music), int(allow_voice), int(flow_synced), now, now))
         await db.commit()
     return await _get_with_db(db, "project", "id", pid)
 

@@ -115,14 +115,19 @@ async def list_pending():
 
 @router.get("/batch-status", response_model=BatchStatus)
 async def batch_status(video_id: str = None, project_id: str = None,
-                       type: str = None, orientation: str = None):
+                       type: str = None, orientation: str = None,
+                       since: str = None):
     """Aggregate status for all requests matching the filter.
-    Poll this instead of polling N individual request IDs."""
+    Poll this instead of polling N individual request IDs.
+    `since` is an ISO timestamp (e.g. 2026-01-01T00:00:00Z) to only count requests created at or after that time.
+    Use it to avoid counting stale requests from previous sessions."""
     rows = await crud.list_requests(video_id=video_id, project_id=project_id)
     if type:
         rows = [r for r in rows if r.get("type") == type]
     if orientation:
         rows = [r for r in rows if r.get("orientation") == orientation]
+    if since:
+        rows = [r for r in rows if r.get("created_at", "") >= since]
     counts = {"PENDING": 0, "PROCESSING": 0, "COMPLETED": 0, "FAILED": 0}
     for r in rows:
         s = r.get("status", "PENDING")
@@ -157,3 +162,79 @@ async def update(rid: str, body: RequestUpdate):
     if not r:
         raise HTTPException(404, "Request not found")
     return r
+
+
+@router.post("/{rid}/cancel")
+async def cancel(rid: str):
+    r = await crud.get_request(rid)
+    if not r:
+        raise HTTPException(404, "Request not found")
+    
+    # 1. Update request status to FAILED
+    await crud.update_request(rid, status="FAILED", error_message="Cancelled by user")
+    
+    # 2. Add to cancellation registry
+    from agent.utils.cancel_registry import cancel_request
+    cancel_request(rid)
+    
+    # 3. Update the corresponding scene status to FAILED if it was PROCESSING/PENDING
+    scene_id = r.get("scene_id")
+    req_type = r.get("type")
+    orientation = r.get("orientation") or "VERTICAL"
+    prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
+    
+    if scene_id:
+        updates = {}
+        if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "EDIT_IMAGE"):
+            updates[f"{prefix}_image_status"] = "FAILED"
+        elif req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS"):
+            updates[f"{prefix}_video_status"] = "FAILED"
+        elif req_type == "UPSCALE_VIDEO":
+            updates[f"{prefix}_upscale_status"] = "FAILED"
+        if updates:
+            await crud.update_scene(scene_id, **updates)
+            
+    # Notify event bus so the dashboard knows!
+    from agent.services.event_bus import event_bus
+    await event_bus.emit("request_update", {"id": rid, "status": "FAILED", "error": "Cancelled by user"})
+    
+    return {"status": "success", "message": f"Request {rid} cancelled"}
+
+
+@router.post("/cancel-active")
+async def cancel_active(scene_id: str, type: str, orientation: Optional[str] = "VERTICAL"):
+    # Find all pending/processing requests for this scene and type
+    existing = await crud.list_requests(scene_id=scene_id)
+    active = [r for r in existing
+              if r.get("type") == type
+              and r.get("status") in ("PENDING", "PROCESSING")]
+              
+    if not active:
+        return {"status": "skipped", "message": "No active requests found"}
+        
+    from agent.utils.cancel_registry import cancel_request
+    from agent.services.event_bus import event_bus
+    
+    prefix = "vertical" if orientation == "VERTICAL" else "horizontal"
+    
+    for r in active:
+        rid = r["id"]
+        # Update request status to FAILED
+        await crud.update_request(rid, status="FAILED", error_message="Cancelled by user")
+        # Add to cancel registry
+        cancel_request(rid)
+        # Emit update
+        await event_bus.emit("request_update", {"id": rid, "status": "FAILED", "error": "Cancelled by user"})
+        
+    # Update corresponding scene status
+    updates = {}
+    if type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "EDIT_IMAGE"):
+        updates[f"{prefix}_image_status"] = "FAILED"
+    elif type in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS"):
+        updates[f"{prefix}_video_status"] = "FAILED"
+    elif type == "UPSCALE_VIDEO":
+        updates[f"{prefix}_upscale_status"] = "FAILED"
+    if updates:
+        await crud.update_scene(scene_id, **updates)
+        
+    return {"status": "success", "message": f"Cancelled {len(active)} request(s) for scene {scene_id[:8]}"}

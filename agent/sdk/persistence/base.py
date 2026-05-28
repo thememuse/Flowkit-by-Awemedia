@@ -80,6 +80,10 @@ class Repository(ABC):
     async def delete_project(self, project_id: str) -> bool:
         """Delete a project by id. Returns True if deleted."""
 
+    @abstractmethod
+    async def update_project(self, project_id: str, **kwargs: Any) -> Optional[Project]:
+        """Update a project's columns. Returns the updated Project."""
+
     # ------------------------------------------------------------------
     # Typed Character methods
     # ------------------------------------------------------------------

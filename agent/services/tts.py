@@ -143,7 +143,9 @@ async def generate_video_narration(
     scene_map = {}
     for scene in scenes:
         scene_id = scene.get("id")
-        display_order = scene.get("display_order", 0)
+        display_order = scene.get("display_order")
+        if display_order is None:
+            display_order = 0
         narrator_text = scene.get("narrator_text")
 
         if not narrator_text:

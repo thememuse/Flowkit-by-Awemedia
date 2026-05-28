@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timezone
 
 import aiohttp
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from agent.config import BASE_DIR
@@ -133,11 +133,6 @@ def _get_repo() -> SQLiteRepository:
 async def create(body: ProjectCreate):
     from agent.materials import get_material
 
-    # Step 1: Create project on Google Flow to get the real projectId
-    client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected — cannot create project on Google Flow")
-
     # Resolve material (support legacy style field + material field)
     material_id = _resolve_material_id(body.material)
     material = get_material(material_id)
@@ -152,25 +147,40 @@ async def create(body: ProjectCreate):
             dupes = [s for s in slugs if slugs.count(s) > 1]
             raise HTTPException(400, f"Duplicate character slugs: {list(set(dupes))}")
 
-    detected_tier = await _detect_user_tier(client)
+    client = get_flow_client()
+    flow_project_id = None
+    detected_tier = "PAYGATE_TIER_ONE"
+    flow_synced = False
 
-    flow_result = await client.create_project(body.name, body.tool_name)
-    if flow_result.get("error"):
-        raise HTTPException(502, f"Flow API error: {flow_result['error']}")
+    if client.connected:
+        # Extension connected — create on Google Flow immediately
+        try:
+            detected_tier = await _detect_user_tier(client)
+            flow_result = await client.create_project(body.name, body.tool_name)
+            if flow_result.get("error"):
+                logger.warning("Flow project creation failed: %s", flow_result["error"])
+            else:
+                try:
+                    data = flow_result.get("data", {})
+                    result = data["result"]["data"]["json"]["result"]
+                    flow_project_id = result["projectId"]
+                    flow_synced = True
+                    logger.info("Flow project created: %s", flow_project_id)
+                except (KeyError, TypeError) as e:
+                    logger.warning("Failed to parse Flow response: %s — %s", e, flow_result)
+        except Exception as e:
+            logger.warning("Could not sync project to Google Flow: %s", e)
+    else:
+        logger.info("Extension not connected — creating local project only (sync later)")
 
-    try:
-        data = flow_result.get("data", {})
-        result = data["result"]["data"]["json"]["result"]
-        flow_project_id = result["projectId"]
-    except (KeyError, TypeError) as e:
-        logger.error("Unexpected Flow response: %s", flow_result)
-        raise HTTPException(502, f"Failed to parse Flow response: {e}")
-
-    logger.info("Flow project created: %s", flow_project_id)
+    # Generate a local UUID if Flow didn't provide an ID
+    if not flow_project_id:
+        import uuid
+        flow_project_id = str(uuid.uuid4())
 
     repo = _get_repo()
 
-    # Step 2: Create local project with the Flow-assigned ID and detected tier
+    # Create local project
     create_data = body.model_dump(exclude_none=True)
     create_data.pop("tool_name", None)
     create_data.pop("style", None)
@@ -181,14 +191,15 @@ async def create(body: ProjectCreate):
         name=create_data["name"],
         description=create_data.get("description"),
         story=create_data.get("story"),
-        language=create_data.get("language", "en"),
+        language=create_data.get("language", "vi"),
         user_paygate_tier=detected_tier,
         material=material_id,
         allow_music=create_data.get("allow_music", False),
         allow_voice=create_data.get("allow_voice", False),
+        flow_synced=flow_synced,
     )
 
-    # Step 3: Create reference entities (characters, locations, assets) with profiles
+    # Create reference entities (characters, locations, assets)
     if characters_input:
         for char_input in characters_input:
             etype = char_input.get("entity_type", "character")
@@ -199,14 +210,12 @@ async def create(body: ProjectCreate):
                 entity_type=etype,
                 material_id=material_id,
             )
-            description = profile["description"]
-            image_prompt = profile["image_prompt"]
             char = await repo.create_character(
                 name=char_input["name"],
                 slug=slugify(char_input["name"]),
                 entity_type=etype,
-                description=description,
-                image_prompt=image_prompt,
+                description=profile["description"],
+                image_prompt=profile["image_prompt"],
                 voice_description=char_input.get("voice_description"),
             )
             await repo.link_character_to_project(flow_project_id, char.id)
@@ -248,6 +257,39 @@ async def delete(pid: str):
     return {"ok": True}
 
 
+@router.post("/{pid}/sync-flow")
+async def sync_to_flow(pid: str):
+    """Sync a local-only project to Google Flow (creates project on Google's side).
+
+    Use this when a project was created without extension connected.
+    Returns the flow_project_id if successful.
+    """
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected — open the browser and login first")
+
+    repo = _get_repo()
+    project = await repo.get_project(pid)
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    project_name = project.name if hasattr(project, "name") else project["name"]
+
+    try:
+        flow_result = await client.create_project(project_name)
+        if flow_result.get("error"):
+            raise HTTPException(502, f"Flow API error: {flow_result['error']}")
+        data = flow_result.get("data", {})
+        result = data["result"]["data"]["json"]["result"]
+        flow_id = result["projectId"]
+        logger.info("Synced local project %s to Flow: %s", pid, flow_id)
+        # Mark project as synced in DB
+        await repo.update_project(pid, flow_synced=True)
+        return {"ok": True, "flow_project_id": flow_id, "local_id": pid}
+    except (KeyError, TypeError) as e:
+        raise HTTPException(502, f"Failed to parse Flow response: {e}")
+
+
 @router.post("/{pid}/characters/{cid}")
 async def link_character(pid: str, cid: str):
     repo = _get_repo()
@@ -265,9 +307,20 @@ async def unlink_character(pid: str, cid: str):
 
 
 @router.get("/{pid}/characters", response_model=list[Character])
-async def get_characters(pid: str):
+async def get_characters(pid: str, request: Request):
     repo = _get_repo()
-    return await repo.get_project_characters(pid)
+    chars = await repo.get_project_characters(pid)
+    for c in chars:
+        url = c.reference_image_url
+        if not url or url.startswith("http"):
+            from agent.api.characters import find_local_character_file
+            local_url = find_local_character_file(c.id)
+            if local_url:
+                url = local_url
+        if url:
+            from agent.api.scenes import _localize_url
+            c.reference_image_url = _localize_url(url, request)
+    return chars
 
 
 @router.get("/{pid}/output-dir")
@@ -313,7 +366,38 @@ async def get_output_dir(pid: str):
         meta["created_at"] = existing.get("created_at", now)
     meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
 
-    return {"slug": slug, "path": f"output/{slug}", "meta": meta}
+    return {"slug": slug, "path": str(output_dir.resolve()), "meta": meta}
+
+
+@router.post("/{pid}/open-folder")
+async def open_folder(pid: str):
+    """Open the project output directory in the host OS file explorer (Finder/Explorer)."""
+    repo = _get_repo()
+    project = await repo.get_project(pid)
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    project_name = project.name if hasattr(project, "name") else project["name"]
+    slug = slugify(project_name)
+    output_dir = BASE_DIR / "output" / slug
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    import subprocess
+    import platform
+
+    system = platform.system()
+    logger.info("Opening folder: %s on system %s", output_dir, system)
+    try:
+        if system == "Darwin":  # macOS
+            subprocess.run(["open", str(output_dir)], check=True)
+        elif system == "Windows":
+            subprocess.run(["explorer", str(output_dir)], check=True)
+        else:  # Linux/other
+            subprocess.run(["xdg-open", str(output_dir)], check=True)
+        return {"ok": True}
+    except Exception as e:
+        logger.exception("Failed to open folder: %s", e)
+        raise HTTPException(500, f"Failed to open folder: {e}")
 
 
 _ASPECT_RATIO_MAP = {

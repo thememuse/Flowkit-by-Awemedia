@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS project (
     material TEXT DEFAULT 'realistic',
     allow_music INTEGER NOT NULL DEFAULT 0,
     allow_voice INTEGER NOT NULL DEFAULT 0,
+    flow_synced INTEGER NOT NULL DEFAULT 0,  -- 1 = project created on Google Flow, 0 = local UUID only
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
@@ -302,6 +303,12 @@ CREATE INDEX IF NOT EXISTS idx_request_scene ON request(scene_id);
     negative_prompt TEXT, scene_prefix TEXT, lighting TEXT DEFAULT 'Studio lighting, highly detailed',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')))""")
             logger.info("Migrated: created material table")
+        # Migration: add flow_synced to project table
+        cursor = await db.execute("PRAGMA table_info(project)")
+        project_columns = {row[1] for row in await cursor.fetchall()}
+        if "flow_synced" not in project_columns:
+            await db.execute("ALTER TABLE project ADD COLUMN flow_synced INTEGER NOT NULL DEFAULT 0")
+            logger.info("Migrated: added flow_synced column to project table")
         await db.commit()
     logger.info("Database initialized at %s", DB_PATH)
 
