@@ -337,7 +337,33 @@ async function requestCaptchaFromTab(tabId, requestId, pageAction) {
   }
 }
 
+let captchaQueue = Promise.resolve();
+
 async function solveCaptcha(requestId, captchaAction) {
+  const previousQueue = captchaQueue;
+  let resolveQueue;
+  captchaQueue = new Promise((resolve) => {
+    resolveQueue = resolve;
+  });
+
+  try {
+    await previousQueue;
+  } catch (e) {
+    // Ignore errors from previous captcha solves
+  }
+
+  try {
+    const res = await _executeSolveCaptcha(requestId, captchaAction);
+    // Add a mandatory 4-second delay after each solve to mimic human behavior
+    // and let the Google reCAPTCHA trust score cool down.
+    await sleep(4000);
+    return res;
+  } finally {
+    resolveQueue();
+  }
+}
+
+async function _executeSolveCaptcha(requestId, captchaAction) {
   const tabs = await chrome.tabs.query({
     url: ['https://labs.google/fx/tools/flow*', 'https://labs.google/fx/*/tools/flow*'],
   });

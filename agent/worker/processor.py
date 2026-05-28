@@ -480,14 +480,19 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
         logger.info("Request %s transient WS error, will retry (no retry increment): %s", rid[:8], error_msg)
         return
 
-    # reCAPTCHA errors: retry up to 10 times with a 30s delay between retries to let Google trust score recover
+    # reCAPTCHA errors: retry up to 10 times with incremental backoff + randomized jitter to let Google trust score recover
     if "captcha" in error_lower or "recaptcha" in error_lower:
         retry = req.get("retry_count", 0) + 1
         if retry < 10:
             await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))
             if retry_after is not None:
-                retry_after[rid] = time.time() + 30
-            logger.warning("Request %s reCAPTCHA failed (retry %d/10), will retry in 30s: %s", rid[:8], retry, error_msg)
+                import random
+                # Base 30s + extra 10s per retry + 1-15s randomized jitter to prevent synchronous thundering herd retries
+                delay = 30 + (retry * 10) + random.randint(1, 15)
+                retry_after[rid] = time.time() + delay
+                logger.warning("Request %s reCAPTCHA failed (retry %d/10), will retry in %ds: %s", rid[:8], retry, delay, error_msg)
+            else:
+                logger.warning("Request %s reCAPTCHA failed (retry %d/10), will retry: %s", rid[:8], retry, error_msg)
             return
         else:
             await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
