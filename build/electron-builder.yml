@@ -74,9 +74,6 @@ win:
     - target: portable
       arch:
         - x64
-  certificateSubjectName: Flow Kit
-  signingHashAlgorithms:
-    - sha256
 
 nsis:
   oneClick: false
