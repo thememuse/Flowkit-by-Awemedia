@@ -8,8 +8,7 @@ export default function ExtensionBanner({ isConnected }: ExtensionBannerProps) {
   if (isConnected) return null
 
   const handleMoExtension = () => {
-    window.history.pushState({}, '', '/browser')
-    window.dispatchEvent(new PopStateEvent('popstate'))
+    window.location.hash = '#/browser'
   }
 
   const handleXemHuongDan = () => {
