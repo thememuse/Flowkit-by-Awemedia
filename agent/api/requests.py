@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -6,6 +7,19 @@ from agent.models.enums import StatusType
 from agent.db import crud
 
 router = APIRouter(prefix="/requests", tags=["requests"])
+
+
+def _adjust_since(since_str: str) -> str:
+    try:
+        # since_str is like "2026-05-28T10:13:24.123Z" or "2026-05-28T10:13:24Z"
+        clean_str = since_str.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(clean_str)
+        # Subtract 10 seconds to handle clock drift + millisecond truncation safely
+        dt_adjusted = dt - timedelta(seconds=10)
+        return dt_adjusted.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return since_str
+
 
 
 class RequestUpdate(BaseModel):
@@ -57,6 +71,16 @@ async def create(body: RequestCreate):
     if vid and orient:
         await crud.update_video(vid, orientation=orient)
 
+    # Auto-resume worker if it was paused on new generation trigger
+    try:
+        from agent.worker.processor import get_worker_controller
+        controller = get_worker_controller()
+        if getattr(controller, "paused", False):
+            controller.resume()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Could not auto-resume worker: %s", e)
+
     return await crud.create_request(**data)
 
 
@@ -98,6 +122,17 @@ async def create_batch(body: BatchRequestCreate):
                 results.append(active[0])
                 continue
         results.append(await crud.create_request(**data))
+
+    # Auto-resume worker if it was paused on new generation trigger
+    try:
+        from agent.worker.processor import get_worker_controller
+        controller = get_worker_controller()
+        if getattr(controller, "paused", False):
+            controller.resume()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Could not auto-resume worker: %s", e)
+
     return results
 
 
@@ -127,7 +162,8 @@ async def batch_status(video_id: str = None, project_id: str = None,
     if orientation:
         rows = [r for r in rows if r.get("orientation") == orientation]
     if since:
-        rows = [r for r in rows if r.get("created_at", "") >= since]
+        adjusted_since = _adjust_since(since)
+        rows = [r for r in rows if r.get("created_at", "") >= adjusted_since]
     counts = {"PENDING": 0, "PROCESSING": 0, "COMPLETED": 0, "FAILED": 0}
     for r in rows:
         s = r.get("status", "PENDING")
@@ -140,7 +176,7 @@ async def batch_status(video_id: str = None, project_id: str = None,
         orientation=orientation,
         completed=counts["COMPLETED"],
         failed=counts["FAILED"],
-        done=(counts["PENDING"] == 0 and counts["PROCESSING"] == 0),
+        done=(total > 0 and counts["PENDING"] == 0 and counts["PROCESSING"] == 0),
         all_succeeded=(counts["COMPLETED"] == total and total > 0),
     )
 

@@ -857,8 +857,15 @@ function StylesTab({ settings, update, materials, onMaterialAdded, onMaterialDel
 // ── Info tab ───────────────────────────────────────────────
 function InfoTab() {
   const [license, setLicense] = useState<{ active: boolean; key?: string; expiresAt?: string; durationType?: string; machineId?: string } | null>(null)
+  const [version, setVersion] = useState<string>('1.2.6')
 
   useEffect(() => {
+    fetchAPI<{ version: string }>('/health')
+      .then(res => {
+        if (res.version) setVersion(res.version)
+      })
+      .catch(() => {})
+
     const electronAPI = (window as any).electronAPI
     if (electronAPI) {
       electronAPI.getLicenseStatus().then((status: any) => {
@@ -882,7 +889,7 @@ function InfoTab() {
       <div className="rounded-xl p-5 flex flex-col gap-3" style={{ background: 'var(--card)', border: '1px solid var(--border)' }}>
         <div className="flex items-center gap-1.5 font-bold text-sm" style={{ color: 'var(--text)' }}><Info size={13} color="var(--accent)" /> Flow Kit</div>
         <div className="text-xs flex flex-col gap-1" style={{ color: 'var(--muted)' }}>
-          <div>Phiên bản: <span style={{ color: 'var(--text)' }}>1.1.0</span></div>
+          <div>Phiên bản: <span style={{ color: 'var(--text)' }}>{version}</span></div>
           <div>Backend: <span style={{ color: 'var(--green)' }}>FastAPI + Python</span></div>
           <div>Frontend: <span style={{ color: 'var(--accent)' }}>React + Vite + Electron</span></div>
           <div>AI: <span style={{ color: 'var(--text)' }}>Claude / OpenAI / Gemini</span></div>
