@@ -375,7 +375,7 @@ async function solveCaptcha(requestId, captchaAction) {
 
 async function handleSolveCaptcha(msg) {
   const { id, params } = msg;
-  const result = await solveCaptcha(id, params?.captchaAction || 'VIDEO_GENERATION');
+  const result = await solveCaptcha(id, params?.captchaAction || 'IMAGE_GENERATION');
 
   // Standalone captcha solve counts as captcha-consuming
   metrics.requestCount++;

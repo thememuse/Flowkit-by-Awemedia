@@ -468,7 +468,7 @@ class FlowClient:
             "method": "POST",
             "headers": random_headers(),
             "body": body,
-            "captchaAction": "VIDEO_GENERATION",
+            "captchaAction": "IMAGE_GENERATION",
         }, timeout=60)  # Submit only — polling is separate
 
     async def generate_video_from_references(self, reference_media_ids: list[str],
@@ -514,7 +514,7 @@ class FlowClient:
             "method": "POST",
             "headers": random_headers(),
             "body": body,
-            "captchaAction": "VIDEO_GENERATION",
+            "captchaAction": "IMAGE_GENERATION",
         }, timeout=60)
 
     async def upscale_video(self, media_id: str, scene_id: str,
@@ -547,7 +547,7 @@ class FlowClient:
             "method": "POST",
             "headers": random_headers(),
             "body": body,
-            "captchaAction": "VIDEO_GENERATION",
+            "captchaAction": "IMAGE_GENERATION",
         }, timeout=60)
 
     async def check_video_status(self, operations: list[dict]) -> dict:
