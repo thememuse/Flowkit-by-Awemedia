@@ -17,6 +17,11 @@ from agent.api.ai_generate import (
     _call_ai, _parse_json_response, _material_hint,
     ORIENTATION_HINTS, _char_summary,
 )
+from agent.api.requests import (
+    _ensure_flow_session_ready,
+    _ensure_queue_accepts_new_work,
+    _ensure_recent_captcha_allows_new_work,
+)
 from agent.db import crud
 
 logger = logging.getLogger(__name__)
@@ -137,6 +142,9 @@ async def _poll_refs_done(project_id: str, timeout: int = 300) -> bool:
 
 async def _submit_batch(requests_list: list[dict]):
     """Submit requests to DB directly (bypasses HTTP, same as /api/requests/batch)."""
+    _ensure_queue_accepts_new_work()
+    _ensure_flow_session_ready()
+    await _ensure_recent_captcha_allows_new_work()
     for item in requests_list:
         req_type = item.pop("type", item.pop("req_type", None))
         if not req_type:
@@ -417,6 +425,9 @@ Viết {req.scene_count} cảnh. Trả về JSON:
 @router.post("/auto-pipeline")
 async def start_auto_pipeline(body: AutoPipelineRequest):
     """Khởi chạy full auto-pipeline. Trả về job_id để poll."""
+    _ensure_queue_accepts_new_work()
+    _ensure_flow_session_ready()
+    await _ensure_recent_captcha_allows_new_work()
     job_id = str(uuid.uuid4())
     job = PipelineJob(
         job_id=job_id,

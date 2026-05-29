@@ -152,7 +152,7 @@ async def create(body: ProjectCreate):
     detected_tier = "PAYGATE_TIER_ONE"
     flow_synced = False
 
-    if client.connected:
+    if client.connected and client.flow_key_present:
         # Extension connected — create on Google Flow immediately
         try:
             detected_tier = await _detect_user_tier(client)
@@ -170,6 +170,8 @@ async def create(body: ProjectCreate):
                     logger.warning("Failed to parse Flow response: %s — %s", e, flow_result)
         except Exception as e:
             logger.warning("Could not sync project to Google Flow: %s", e)
+    elif client.connected:
+        logger.info("Flow session not ready — creating local project only (sync later)")
     else:
         logger.info("Extension not connected — creating local project only (sync later)")
 
@@ -267,6 +269,8 @@ async def sync_to_flow(pid: str):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected — open the browser and login first")
+    if not client.flow_key_present:
+        raise HTTPException(409, "Flow session not ready — open/login to Google Flow first")
 
     repo = _get_repo()
     project = await repo.get_project(pid)
@@ -435,6 +439,8 @@ async def generate_thumbnail(pid: str, body: ThumbnailRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    if not client.flow_key_present:
+        raise HTTPException(409, "Flow session not ready — open/login to Google Flow first")
 
     repo = _get_repo()
     project = await repo.get_project(pid)

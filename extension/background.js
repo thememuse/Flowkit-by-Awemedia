@@ -133,7 +133,19 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 
 let _openingFlowTab = false;
 
-async function captureTokenFromFlowTab() {
+async function clearFlowKey(reason) {
+  flowKey = null;
+  metrics.tokenCapturedAt = null;
+  metrics.lastError = reason || 'AUTH_INVALID';
+  await chrome.storage.local.remove(['flowKey']);
+  await chrome.storage.local.set({ metrics });
+  if (ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'token_cleared', reason: reason || 'AUTH_INVALID' }));
+  }
+}
+
+async function captureTokenFromFlowTab(options = {}) {
+  const reload = !!options.reload;
   const tabs = await chrome.tabs.query({
     url: ['https://labs.google/fx/tools/flow*', 'https://labs.google/fx/*/tools/flow*'],
   });
@@ -154,6 +166,10 @@ async function captureTokenFromFlowTab() {
         console.log('[FlowAgent] Flow tab not ready yet after open');
         return;
       }
+      if (reload) {
+        await chrome.tabs.reload(retryTabs[0].id);
+        await sleep(4000);
+      }
       await chrome.scripting.executeScript({
         target: { tabId: retryTabs[0].id },
         files: ['content.js'],
@@ -167,6 +183,10 @@ async function captureTokenFromFlowTab() {
     return;
   }
   try {
+    if (reload) {
+      await chrome.tabs.reload(tabs[0].id);
+      await sleep(4000);
+    }
     await chrome.scripting.executeScript({
       target: { tabId: tabs[0].id },
       files: ['content.js'],
@@ -215,6 +235,11 @@ function connectToAgent() {
       if (apiKey) {
         ws.send(JSON.stringify({ type: 'api_key_captured', apiKey }));
       }
+      if (!flowKey) {
+        captureTokenFromFlowTab().catch((e) => {
+          console.error('[FlowAgent] Initial token capture failed:', e);
+        });
+      }
     }).catch(() => {
       ws.send(JSON.stringify({
         type: 'extension_ready',
@@ -224,6 +249,10 @@ function connectToAgent() {
       }));
       if (flowKey) {
         ws.send(JSON.stringify({ type: 'token_captured', flowKey }));
+      } else {
+        captureTokenFromFlowTab().catch((e) => {
+          console.error('[FlowAgent] Initial token capture failed:', e);
+        });
       }
     });
   };
@@ -240,6 +269,17 @@ function connectToAgent() {
         await handleDownloadAsset(msg);
       } else if (msg.method === 'solve_captcha') {
         await handleSolveCaptcha(msg);
+      } else if (msg.method === 'refresh_token') {
+        captureTokenFromFlowTab({ reload: msg.params?.reload !== false }).catch((e) => {
+          console.error('[FlowAgent] Refresh token command failed:', e);
+        });
+        sendToAgent({
+          id: msg.id,
+          result: {
+            flowKeyPresent: !!flowKey,
+            tokenAge: metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
+          },
+        });
       } else if (msg.method === 'get_status') {
         sendToAgent({
           id: msg.id,
@@ -250,6 +290,10 @@ function connectToAgent() {
             tokenAge: metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
             metrics,
           },
+        });
+      } else if (msg.type === 'refresh_token') {
+        captureTokenFromFlowTab({ reload: msg.reload !== false }).catch((e) => {
+          console.error('[FlowAgent] Refresh token signal failed:', e);
         });
       } else if (msg.type === 'callback_secret') {
         callbackSecret = msg.secret;
@@ -337,33 +381,7 @@ async function requestCaptchaFromTab(tabId, requestId, pageAction) {
   }
 }
 
-let captchaQueue = Promise.resolve();
-
 async function solveCaptcha(requestId, captchaAction) {
-  const previousQueue = captchaQueue;
-  let resolveQueue;
-  captchaQueue = new Promise((resolve) => {
-    resolveQueue = resolve;
-  });
-
-  try {
-    await previousQueue;
-  } catch (e) {
-    // Ignore errors from previous captcha solves
-  }
-
-  try {
-    const res = await _executeSolveCaptcha(requestId, captchaAction);
-    // Add a mandatory 4-second delay after each solve to mimic human behavior
-    // and let the Google reCAPTCHA trust score cool down.
-    await sleep(4000);
-    return res;
-  } finally {
-    resolveQueue();
-  }
-}
-
-async function _executeSolveCaptcha(requestId, captchaAction) {
   const tabs = await chrome.tabs.query({
     url: ['https://labs.google/fx/tools/flow*', 'https://labs.google/fx/*/tools/flow*'],
   });
@@ -401,7 +419,7 @@ async function _executeSolveCaptcha(requestId, captchaAction) {
 
 async function handleSolveCaptcha(msg) {
   const { id, params } = msg;
-  const result = await solveCaptcha(id, params?.captchaAction || 'IMAGE_GENERATION');
+  const result = await solveCaptcha(id, params?.captchaAction || 'VIDEO_GENERATION');
 
   // Standalone captcha solve counts as captcha-consuming
   metrics.requestCount++;
@@ -486,7 +504,18 @@ async function handleApiRequest(msg) {
   }
 
   try {
-    // Step 1: Solve captcha if needed
+    // Step 1: Use flowKey for auth. Never solve captcha without a usable Flow session.
+    const activeFlowKey = flowKey;
+    if (!activeFlowKey) {
+      sendToAgent({ id, status: 503, error: 'NO_FLOW_KEY' });
+      if (hasCaptcha) { metrics.failedCount++; metrics.lastError = 'NO_FLOW_KEY'; }
+      chrome.storage.local.set({ metrics });
+      updateRequestLog(logId, { status: 'failed', error: 'NO_FLOW_KEY' });
+      setState('idle');
+      return;
+    }
+
+    // Step 2: Solve captcha if needed
     let captchaToken = null;
     if (captchaAction) {
       const captchaResult = await solveCaptcha(id, captchaAction);
@@ -504,7 +533,7 @@ async function handleApiRequest(msg) {
       }
     }
 
-    // Step 2: Inject captcha token into body
+    // Step 3: Inject captcha token into body
     let finalBody = body;
     if (captchaToken && finalBody) {
       finalBody = JSON.parse(JSON.stringify(finalBody)); // deep clone
@@ -518,17 +547,6 @@ async function handleApiRequest(msg) {
           }
         }
       }
-    }
-
-    // Step 3: Use flowKey for auth
-    const activeFlowKey = flowKey;
-    if (!activeFlowKey) {
-      sendToAgent({ id, status: 503, error: 'NO_FLOW_KEY' });
-      if (hasCaptcha) { metrics.failedCount++; metrics.lastError = 'NO_FLOW_KEY'; }
-      chrome.storage.local.set({ metrics });
-      updateRequestLog(logId, { status: 'failed', error: 'NO_FLOW_KEY' });
-      setState('idle');
-      return;
     }
 
     const fetchHeaders = { ...(headers || {}) };
@@ -548,6 +566,13 @@ async function handleApiRequest(msg) {
       responseData = JSON.parse(responseText);
     } catch {
       responseData = responseText;
+    }
+
+    if (response.status === 401) {
+      await clearFlowKey('AUTH_401');
+      captureTokenFromFlowTab().catch((e) => {
+        console.error('[FlowAgent] Token refresh after 401 failed:', e);
+      });
     }
 
     sendToAgent({
@@ -690,7 +715,7 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
   }
 
   if (msg.type === 'TEST_CAPTCHA') {
-    solveCaptcha(`test-${Date.now()}`, msg.pageAction || 'IMAGE_GENERATION')
+    solveCaptcha(`test-${Date.now()}`, msg.pageAction || 'VIDEO_GENERATION')
       .then((r) => reply(r))
       .catch((e) => reply({ error: e.message }));
     return true;
@@ -748,104 +773,5 @@ function handleTrpcMediaUrls(trpcUrl, bodyText) {
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
-
-// ─── Human-like Telemetry ──────────────────────────────────
-// Periodically send tracking events to Google's analytics endpoints
-// to mimic normal browser behavior.
-
-const _UA = navigator.userAgent;
-let _telemetrySessionId = `;${Date.now()}`;
-
-function _rand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-
-function _buildBatchLogPayload() {
-  const events = [];
-  const types = ['FLOW_IMAGE_LATENCY', 'FLOW_VIDEO_LATENCY'];
-  const count = _rand(1, 3);
-  for (let i = 0; i < count; i++) {
-    events.push({
-      event: types[_rand(0, types.length - 1)],
-      eventProperties: [
-        { key: 'CURRENT_TIME_MS', doubleValue: Date.now() },
-        { key: 'DURATION_MS', doubleValue: _rand(150, 800) },
-        { key: 'USER_AGENT', stringValue: _UA },
-        { key: 'IS_DESKTOP', booleanValue: true },
-      ],
-      eventMetadata: { sessionId: _telemetrySessionId },
-      eventTime: new Date().toISOString(),
-    });
-  }
-  return { appEvents: events };
-}
-
-function _buildFrontendEventsPayload() {
-  const eventTypes = [
-    'FLOW_IMAGE_LATENCY', 'FLOW_VIDEO_LATENCY', 'GRID_SCROLL_DEPTH',
-    'FLOW_PROJECT_OPEN', 'FLOW_SCENE_VIEW',
-  ];
-  const count = _rand(1, 4);
-  const events = [];
-  for (let i = 0; i < count; i++) {
-    const et = eventTypes[_rand(0, eventTypes.length - 1)];
-    const params = {
-      USER_AGENT: { '@type': 'type.googleapis.com/google.protobuf.StringValue', value: _UA },
-      IS_DESKTOP: { '@type': 'type.googleapis.com/google.protobuf.StringValue', value: 'true' },
-    };
-    if (et.includes('LATENCY')) {
-      params.CURRENT_TIME_MS = { '@type': 'type.googleapis.com/google.protobuf.StringValue', value: String(Date.now()) };
-      params.DURATION_MS = { '@type': 'type.googleapis.com/google.protobuf.StringValue', value: String(_rand(100, 600)) };
-    }
-    if (et === 'GRID_SCROLL_DEPTH') {
-      params.MEDIA_GENERATION_PAYGATE_TIER = { '@type': 'type.googleapis.com/google.protobuf.StringValue', value: 'PAYGATE_TIER_TWO' };
-    }
-    events.push({
-      eventType: et,
-      metadata: {
-        sessionId: _telemetrySessionId,
-        createTime: new Date().toISOString(),
-        additionalParams: params,
-      },
-    });
-  }
-  return { events };
-}
-
-async function sendTelemetry() {
-  if (!flowKey || state === 'off') return;
-
-  const headers = {
-    'Content-Type': 'text/plain;charset=UTF-8',
-    'authorization': `Bearer ${flowKey}`,
-  };
-
-  // Telemetry is silent — don't show in request log
-  try {
-    if (Math.random() < 0.5) {
-      await fetch(`https://aisandbox-pa.googleapis.com/v1:batchLog`, {
-        method: 'POST', headers, credentials: 'include',
-        body: JSON.stringify(_buildBatchLogPayload()),
-      });
-    } else {
-      await fetch(`https://aisandbox-pa.googleapis.com/v1/flow:batchLogFrontendEvents`, {
-        method: 'POST', headers, credentials: 'include',
-        body: JSON.stringify(_buildFrontendEventsPayload()),
-      });
-    }
-  } catch {}
-}
-
-// Send telemetry at random intervals (45-120s) to look organic
-function scheduleTelemetry() {
-  const delay = _rand(45, 120) * 1000;
-  setTimeout(async () => {
-    await sendTelemetry();
-    scheduleTelemetry(); // reschedule with new random interval
-  }, delay);
-}
-
-// Refresh session ID every ~30min like a real user
-setInterval(() => { _telemetrySessionId = `;${Date.now()}`; }, _rand(25, 35) * 60 * 1000);
-
-scheduleTelemetry();
 
 console.log('[FlowAgent] Extension loaded');

@@ -5,6 +5,7 @@ interface HealthStatus {
   status: string
   version: string
   extension_connected: boolean
+  flow_key_present?: boolean
   ws: {
     connected: boolean
     connects: number
@@ -52,6 +53,7 @@ export function useHealthStatus() {
     health,
     error,
     extensionConnected: health?.extension_connected ?? false,
+    flowKeyPresent: health?.flow_key_present ?? false,
     agentHealthy: health?.status === 'ok',
   }
 }

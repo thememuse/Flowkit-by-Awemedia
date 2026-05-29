@@ -4,9 +4,11 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from agent.worker.processor import (
+    WorkerController,
     _is_already_completed,
     _mark_scene_failed,
     _handle_failure,
+    _process_one,
 )
 from agent.config import MAX_RETRIES
 
@@ -31,6 +33,62 @@ def make_req(
         "project_id": "proj-001",
         "video_id": "video-001",
     }
+
+
+# ---------------------------------------------------------------------------
+# WorkerController cleanup
+# ---------------------------------------------------------------------------
+
+class TestWorkerControllerCleanup:
+    def test_flow_key_auto_resume_requires_recent_arm(self):
+        controller = WorkerController()
+
+        controller.pause("NO_FLOW_KEY")
+        assert controller.can_auto_resume_after_flow_key() is False
+
+        controller.arm_flow_key_auto_resume()
+        assert controller.can_auto_resume_after_flow_key() is True
+
+        controller.resume()
+        assert controller.can_auto_resume_after_flow_key() is False
+
+    def test_manual_pause_clears_flow_key_auto_resume_arm(self):
+        controller = WorkerController()
+
+        controller.arm_flow_key_auto_resume()
+        controller.pause("USER")
+
+        assert controller.can_auto_resume_after_flow_key() is False
+
+    @pytest.mark.asyncio
+    async def test_cleanup_stale_processing_restores_scene_status_to_pending(self):
+        controller = WorkerController()
+        stale = [make_req(req_type="GENERATE_VIDEO", scene_id="scene-001", orientation="VERTICAL")]
+
+        with patch("agent.worker.processor.crud") as mock_crud:
+            mock_crud.list_requests = AsyncMock(return_value=stale)
+            mock_crud.update_request = AsyncMock()
+            mock_crud.update_scene = AsyncMock()
+            await controller._cleanup_stale_processing()
+
+        mock_crud.update_request.assert_awaited_once_with(
+            stale[0]["id"],
+            status="PENDING",
+            error_message="reset: stale PROCESSING on startup",
+        )
+        mock_crud.update_scene.assert_awaited_once_with("scene-001", vertical_video_status="PENDING")
+
+    @pytest.mark.asyncio
+    async def test_startup_existing_queue_pauses_worker(self):
+        controller = WorkerController()
+        pending = [make_req(req_type="GENERATE_VIDEO")]
+
+        with patch("agent.worker.processor.crud") as mock_crud:
+            mock_crud.list_requests = AsyncMock(side_effect=[pending, []])
+            await controller._pause_if_existing_queue()
+
+        assert controller.paused is True
+        assert controller.pause_reason == "STALE_QUEUE"
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +207,6 @@ class TestHandleFailure:
         assert call_kwargs[0][0] == rid
         assert call_kwargs[1]["status"] == "PENDING"
         assert call_kwargs[1]["retry_count"] == 1
-        assert call_kwargs[1]["next_retry_at"]
 
     @pytest.mark.asyncio
     async def test_marks_failed_when_at_max_retries(self):
@@ -193,9 +250,11 @@ class TestHandleFailure:
         assert "caller does not have permission" in call_kwargs[1]["error_message"]
 
     @pytest.mark.asyncio
-    async def test_recaptcha_unusual_activity_sets_durable_backoff(self):
-        req = make_req(req_type="GENERATE_VIDEO", retry_count=1)
+    async def test_unusual_activity_captcha_pauses_worker_without_retry_timer(self):
+        """PUBLIC_ERROR_UNUSUAL_ACTIVITY should not keep auto-retrying."""
+        req = make_req(req_type="GENERATE_VIDEO", retry_count=0)
         rid = req["id"]
+        retry_after = {}
         result = {
             "data": {
                 "error": {
@@ -205,14 +264,77 @@ class TestHandleFailure:
                 }
             }
         }
+        controller = MagicMock()
 
         with patch("agent.worker.processor.crud") as mock_crud, \
-             patch("agent.worker.processor.event_bus") as mock_bus:
+                patch("agent.worker.processor.get_worker_controller", return_value=controller):
             mock_crud.update_request = AsyncMock()
-            mock_bus.emit = AsyncMock()
-            await _handle_failure(rid, req, result, retry_after={})
+            mock_crud.update_scene = AsyncMock()
+            await _handle_failure(rid, req, result, retry_after)
 
-        call_kwargs = mock_crud.update_request.call_args
-        assert call_kwargs[1]["status"] == "PENDING"
-        assert call_kwargs[1]["retry_count"] == 2
-        assert call_kwargs[1]["next_retry_at"]
+        mock_crud.update_request.assert_awaited_once()
+        call_args = mock_crud.update_request.call_args
+        assert call_args[0][0] == rid
+        assert call_args[1]["status"] == "PENDING"
+        assert call_args[1]["retry_count"] == 1
+        assert "PUBLIC_ERROR_UNUSUAL_ACTIVITY" in call_args[1]["error_message"]
+        assert retry_after == {}
+        controller.pause.assert_called_once_with("CAPTCHA_UNUSUAL_ACTIVITY")
+
+    @pytest.mark.asyncio
+    async def test_generic_captcha_keeps_short_retry_timer(self):
+        """Non-unusual captcha errors keep the short in-memory retry path."""
+        req = make_req(req_type="GENERATE_VIDEO", retry_count=0)
+        rid = req["id"]
+        retry_after = {}
+        result = {"error": "reCAPTCHA evaluation failed"}
+
+        with patch("agent.worker.processor.crud") as mock_crud, \
+                patch("agent.worker.processor.get_worker_controller") as mock_controller:
+            mock_crud.update_request = AsyncMock()
+            mock_crud.update_scene = AsyncMock()
+            await _handle_failure(rid, req, result, retry_after)
+
+        assert retry_after[rid] > 0
+        mock_controller.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_flow_key_pauses_worker_without_retry_increment(self):
+        """Missing Flow token should pause instead of burning retries."""
+        req = make_req(req_type="GENERATE_VIDEO", retry_count=4)
+        rid = req["id"]
+        retry_after = {}
+        controller = MagicMock()
+
+        with patch("agent.worker.processor.crud") as mock_crud, \
+                patch("agent.worker.processor.get_worker_controller", return_value=controller):
+            mock_crud.update_request = AsyncMock()
+            mock_crud.update_scene = AsyncMock()
+            await _handle_failure(rid, req, {"error": "NO_FLOW_KEY"}, retry_after)
+
+        mock_crud.update_request.assert_awaited_once_with(
+            rid,
+            status="PENDING",
+            error_message="NO_FLOW_KEY",
+        )
+        mock_crud.update_scene.assert_awaited_once_with("scene-001", vertical_video_status="PENDING")
+        assert retry_after == {}
+        controller.pause.assert_called_once_with("NO_FLOW_KEY")
+
+    @pytest.mark.asyncio
+    async def test_processing_failure_restores_scene_status_to_pending(self):
+        """Soft retry should not leave the scene asset stuck in PROCESSING."""
+        req = make_req(req_type="GENERATE_IMAGE", scene_id="scene-001", orientation="VERTICAL")
+
+        with patch("agent.worker.processor.crud") as mock_crud, \
+                patch("agent.worker.processor._is_already_completed", new_callable=AsyncMock, return_value=False), \
+                patch("agent.worker.processor._dispatch", new_callable=AsyncMock, return_value={"error": "timeout"}), \
+                patch("agent.worker.processor.event_bus") as mock_bus:
+            mock_crud.update_request = AsyncMock()
+            mock_crud.update_scene = AsyncMock()
+            mock_bus.emit = AsyncMock()
+            await _process_one(req, retry_after={})
+
+        scene_status_updates = [call.kwargs for call in mock_crud.update_scene.await_args_list]
+        assert {"vertical_image_status": "PROCESSING"} in scene_status_updates
+        assert {"vertical_image_status": "PENDING"} in scene_status_updates

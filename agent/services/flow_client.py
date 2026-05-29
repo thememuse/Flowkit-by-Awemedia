@@ -58,6 +58,11 @@ class FlowClient:
     def set_flow_key(self, key: str):
         self._flow_key = key
 
+    def clear_flow_key(self, reason: str = "unknown"):
+        if self._flow_key is not None:
+            logger.warning("Flow key cleared: %s", reason)
+        self._flow_key = None
+
     @property
     def api_key(self) -> str:
         return self._api_key
@@ -71,6 +76,10 @@ class FlowClient:
     @property
     def connected(self) -> bool:
         return self._extension_ws is not None
+
+    @property
+    def flow_key_present(self) -> bool:
+        return self._flow_key is not None
 
     @property
     def ws_stats(self) -> dict:
@@ -90,6 +99,11 @@ class FlowClient:
             self._flow_key = data.get("flowKey")
             logger.info("Flow key captured from extension")
             asyncio.create_task(self._sync_tier())
+            self._resume_worker_after_flow_key()
+            return
+
+        if data.get("type") in ("token_cleared", "auth_invalid"):
+            self.clear_flow_key(data.get("reason") or data.get("type"))
             return
 
         if data.get("type") == "api_key_captured":
@@ -100,9 +114,13 @@ class FlowClient:
 
         if data.get("type") == "extension_ready":
             logger.info("Extension ready, flowKey=%s", "yes" if data.get("flowKeyPresent") else "no")
+            if not data.get("flowKeyPresent"):
+                self.clear_flow_key("extension_ready_without_flow_key")
             if data.get("apiKey"):
                 self.set_api_key(data.get("apiKey"))
-            asyncio.create_task(self._sync_tier())
+            if data.get("flowKeyPresent") and self._flow_key:
+                asyncio.create_task(self._sync_tier())
+                self._resume_worker_after_flow_key()
             return
 
         if data.get("type") == "media_urls_refresh":
@@ -147,6 +165,18 @@ class FlowClient:
             logger.warning("Failed to sync tier: %s", e)
         finally:
             self._sync_in_progress = False
+
+    def _resume_worker_after_flow_key(self):
+        """Resume only queues paused by missing Flow auth; keep manual/captcha pauses intact."""
+        try:
+            from agent.worker.processor import get_worker_controller
+            controller = get_worker_controller()
+            can_resume = getattr(controller, "can_auto_resume_after_flow_key", lambda: False)
+            if can_resume():
+                controller.resume()
+                logger.info("Worker auto-resumed after Flow key capture")
+        except Exception as e:
+            logger.debug("Worker auto-resume after Flow key skipped: %s", e)
 
     _UUID_RE = __import__("re").compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
     _SAFE_URL_RE = __import__("re").compile(r'^https://(storage\.googleapis\.com|lh3\.googleusercontent\.com)/')
@@ -271,6 +301,8 @@ class FlowClient:
         """
         if not self._extension_ws:
             return {"error": "Extension not connected"}
+        if method == "api_request" and not self._flow_key:
+            return {"error": "NO_FLOW_KEY", "status": 503}
 
         req_id = str(uuid.uuid4())
         future = asyncio.get_running_loop().create_future()
@@ -290,6 +322,17 @@ class FlowClient:
             return {"error": str(e)}
         finally:
             self._pending.pop(req_id, None)
+
+    async def refresh_token(self, reload_tab: bool = True) -> dict:
+        """Ask the extension to refresh the Google Flow tab and recapture auth."""
+        if not self._extension_ws:
+            return {"error": "Extension not connected"}
+        await self._extension_ws.send(json.dumps({
+            "type": "refresh_token",
+            "reload": reload_tab,
+        }))
+        return {"sent": True}
+
 
     def _build_url(self, endpoint_key: str, **kwargs) -> str:
         """Build full API URL."""
@@ -468,7 +511,7 @@ class FlowClient:
             "method": "POST",
             "headers": random_headers(),
             "body": body,
-            "captchaAction": "IMAGE_GENERATION",
+            "captchaAction": "VIDEO_GENERATION",
         }, timeout=60)  # Submit only — polling is separate
 
     async def generate_video_from_references(self, reference_media_ids: list[str],
@@ -514,7 +557,7 @@ class FlowClient:
             "method": "POST",
             "headers": random_headers(),
             "body": body,
-            "captchaAction": "IMAGE_GENERATION",
+            "captchaAction": "VIDEO_GENERATION",
         }, timeout=60)
 
     async def upscale_video(self, media_id: str, scene_id: str,
@@ -547,7 +590,7 @@ class FlowClient:
             "method": "POST",
             "headers": random_headers(),
             "body": body,
-            "captchaAction": "IMAGE_GENERATION",
+            "captchaAction": "VIDEO_GENERATION",
         }, timeout=60)
 
     async def check_video_status(self, operations: list[dict]) -> dict:

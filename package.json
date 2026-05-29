@@ -1,6 +1,6 @@
 {
   "name": "flowkit",
-  "version": "1.2.8",
+  "version": "1.2.9",
   "description": "Flow Kit — AI Video Production Desktop App",
   "main": "electron/main.js",
   "author": {
@@ -15,12 +15,15 @@
     "build": "npm run build:renderer && npm run build:electron",
     "build:renderer": "cd dashboard && cross-env BUILD_TARGET=electron npm run build",
     "build:electron": "echo 'Electron main is plain JS, no build needed'",
-    "dist": "npm run build && electron-builder",
-    "dist:mac": "npm run build && electron-builder --mac",
-    "dist:mac:arm": "npm run build && electron-builder --mac --arm64",
-    "dist:mac:x64": "npm run build && electron-builder --mac --x64",
-    "dist:win": "npm run build && electron-builder --win",
-    "dist:all": "npm run build && electron-builder --mac --win",
+    "build:agent": "node build/build-agent.js",
+    "build:agent:mac": "node build/build-agent.js mac",
+    "build:agent:win": "node build/build-agent.js win",
+    "dist": "npm run build && npm run build:agent && electron-builder",
+    "dist:mac": "npm run build && npm run build:agent:mac && electron-builder --mac",
+    "dist:mac:arm": "npm run build && npm run build:agent:mac && electron-builder --mac --arm64",
+    "dist:mac:x64": "npm run build && npm run build:agent:mac && electron-builder --mac --x64",
+    "dist:win": "npm run build && npm run build:agent:win && electron-builder --win",
+    "dist:all": "npm run build && node build/build-agent.js all && electron-builder --mac --win",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {

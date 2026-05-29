@@ -30,6 +30,7 @@ class BrowserManager {
     this._extensionPath = null;
     this._profileDir = null;
     this._playwright = null;
+    this._openPromise = null;
   }
 
   // ─── Khởi tạo đường dẫn ──────────────────────────────────
@@ -107,6 +108,18 @@ class BrowserManager {
   }
 
   async open(url = 'https://labs.google/fx/tools/flow') {
+    if (this._openPromise) {
+      this._log('[Browser] Trình duyệt đang khởi động, dùng lại phiên mở hiện tại');
+      return this._openPromise;
+    }
+
+    this._openPromise = this._open(url).finally(() => {
+      this._openPromise = null;
+    });
+    return this._openPromise;
+  }
+
+  async _open(url = 'https://labs.google/fx/tools/flow') {
     this._init();
 
     // Nếu đã mở rồi, focus lại
@@ -168,26 +181,7 @@ class BrowserManager {
       }
 
       // Launch persistent context (giữ session login)
-      this._context = await this._playwright.launchPersistentContext(
-        this._profileDir,
-        {
-          headless: false,
-          args,
-          // User agent của Chrome thật (không có Playwright/HeadlessChrome)
-          userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-          viewport: null, // Dùng kích thước cửa sổ thật
-          ignoreDefaultArgs: [
-            '--enable-automation',  // Quan trọng: tắt automation flag
-            '--enable-blink-features=IdleDetection',
-          ],
-          // Kích thước cửa sổ ban đầu
-          // chromiumSandbox: true,
-          slowMo: 0,
-          channel: undefined, // dùng playwright chromium
-          locale: 'vi-VN',
-          timezoneId: 'Asia/Ho_Chi_Minh',
-        }
-      );
+      this._context = await this._launchPersistentContext(args);
 
       this._log('[Browser] Trình duyệt đã khởi động');
 
@@ -223,13 +217,17 @@ class BrowserManager {
         timeout: 30000,
       });
 
-      this._setStatus({ open: true, url: this._page.url(), loggedIn: false });
+      this._setStatus({
+        open: true,
+        url: this._page.url(),
+        loggedIn: this._isLoggedInUrl(this._page.url()),
+      });
 
       // Theo dõi thay đổi URL (để detect login)
       this._page.on('framenavigated', (frame) => {
         if (frame === this._page.mainFrame()) {
           const currentUrl = this._page.url();
-          const loggedIn = !currentUrl.includes('accounts.google.com');
+          const loggedIn = this._isLoggedInUrl(currentUrl);
           this._setStatus({ open: true, url: currentUrl, loggedIn });
         }
       });
@@ -291,6 +289,95 @@ class BrowserManager {
     } catch (_) {}
     this._context = null;
     this._page = null;
+  }
+
+  async _launchPersistentContext(args) {
+    const options = {
+      headless: false,
+      args,
+      // Let Chromium expose its real platform/version UA. A hard-coded UA
+      // (especially macOS on Windows) creates a fingerprint mismatch that
+      // can increase reCAPTCHA scrutiny.
+      viewport: null, // Dùng kích thước cửa sổ thật
+      ignoreDefaultArgs: [
+        '--enable-automation',  // Quan trọng: tắt automation flag
+        // Playwright disables extensions by default. If this flag remains,
+        // --load-extension is ignored and the agent never receives requests.
+        '--disable-extensions',
+        '--enable-blink-features=IdleDetection',
+      ],
+      // Kích thước cửa sổ ban đầu
+      // chromiumSandbox: true,
+      slowMo: 0,
+      channel: undefined, // dùng playwright chromium
+      locale: 'vi-VN',
+      timezoneId: 'Asia/Ho_Chi_Minh',
+    };
+
+    try {
+      return await this._playwright.launchPersistentContext(this._profileDir, options);
+    } catch (err) {
+      if (!this._isProfileLockError(err)) throw err;
+
+      this._log('[Browser] Profile Chromium đang bị khóa, đang dọn phiên trình duyệt cũ...');
+      await this._cleanupProfileLock();
+      try {
+        return await this._playwright.launchPersistentContext(this._profileDir, options);
+      } catch (retryErr) {
+        if (this._isProfileLockError(retryErr)) {
+          retryErr.message = `${retryErr.message}\n\nProfile vẫn đang bị khóa tại ${this._profileDir}. Hãy đóng mọi cửa sổ Chromium/Flow Kit đang dùng profile này rồi thử lại.`;
+        }
+        throw retryErr;
+      }
+    }
+  }
+
+  _isProfileLockError(err) {
+    const message = String(err?.message || err || '');
+    return message.includes('ProcessSingleton')
+      || message.includes('profile directory')
+      || message.includes('profile is already in use')
+      || message.includes('Lock file can not be created');
+  }
+
+  _isLoggedInUrl(url) {
+    return !!url && !url.includes('accounts.google.com');
+  }
+
+  async _cleanupProfileLock() {
+    await this._killProfileChromiumProcesses();
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    if (process.platform === 'win32') {
+      const lockFile = path.join(this._profileDir, 'lockfile');
+      try {
+        if (fs.existsSync(lockFile)) fs.rmSync(lockFile, { force: true });
+      } catch (_) {}
+    }
+  }
+
+  async _killProfileChromiumProcesses() {
+    if (process.platform !== 'win32') return;
+
+    const { execFile } = require('child_process');
+    const profileDir = this._profileDir.replace(/'/g, "''");
+    const script = [
+      `$profile = '${profileDir}'`,
+      "Get-CimInstance Win32_Process |",
+      "  Where-Object { $_.Name -eq 'chrome.exe' -and $_.CommandLine -like \"*$profile*\" } |",
+      "  ForEach-Object {",
+      "    try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {}",
+      "  }",
+    ].join('\n');
+
+    await new Promise((resolve) => {
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+        { timeout: 5000, windowsHide: true },
+        () => resolve(),
+      );
+    });
   }
 
   // ─── Getters ─────────────────────────────────────────────

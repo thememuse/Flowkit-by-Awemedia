@@ -1,7 +1,7 @@
 @echo off
 REM ============================================================
 REM build/build-python.bat — Build Python agent with PyInstaller (Windows)
-REM Creates: resources\agent-win\agent.exe
+REM Creates: resources\agent-win\agent\agent.exe
 REM ============================================================
 
 setlocal enabledelayedexpansion

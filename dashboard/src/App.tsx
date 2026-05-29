@@ -3,7 +3,7 @@ import { HashRouter, NavLink, Routes, Route, useLocation, useNavigate, useParams
 import { fetchAPI, postAPI } from './api/client'
 import {
   LayoutDashboard, FolderOpen, ScrollText, Film, Image as ImageIcon,
-  Globe, Settings, Zap, Clapperboard, Wifi, WifiOff, Plug, PlugZap, AudioWaveform, Clock
+  Globe, Settings, Zap, Clapperboard, Wifi, WifiOff, Plug, PlugZap, AudioWaveform
 } from 'lucide-react'
 import { useWebSocket } from './api/useWebSocket'
 import { useHealthStatus } from './api/useHealthStatus'
@@ -24,6 +24,7 @@ import LicenseGate from './components/electron/LicenseGate'
 
 const isElectron = typeof window !== 'undefined' && !!(window as unknown as { electronAPI?: unknown }).electronAPI
 const isMac = typeof navigator !== 'undefined' && navigator.platform.includes('Mac')
+const GOOGLE_FLOW_URL = 'https://labs.google/fx/tools/flow'
 
 const NAV = [
   { to: '/', icon: LayoutDashboard, label: 'Tổng quan', exact: true },
@@ -84,20 +85,39 @@ function StudioPageWrapper() {
 
 function Layout() {
   const { isConnected } = useWebSocket()
-  const { extensionConnected } = useHealthStatus()
+  const { extensionConnected, flowKeyPresent } = useHealthStatus()
+  const navigate = useNavigate()
   const [workerPaused, setWorkerPaused] = useState(false)
-  const [activeRequestsCount, setActiveRequestsCount] = useState(0)
-  const [captchaCooldownUntil, setCaptchaCooldownUntil] = useState<string | null>(null)
+  const [workerPauseReason, setWorkerPauseReason] = useState<string | null>(null)
+  const [queueRequestsCount, setQueueRequestsCount] = useState(0)
+  const [workerFlowKeyPresent, setWorkerFlowKeyPresent] = useState(false)
+  const [canAutoResumeAfterFlowKey, setCanAutoResumeAfterFlowKey] = useState(false)
+  const flowSessionReady = flowKeyPresent || workerFlowKeyPresent
+  const resumeNeedsCleanup = workerPaused && flowSessionReady && !canAutoResumeAfterFlowKey && (
+    workerPauseReason === 'NO_FLOW_KEY'
+    || workerPauseReason === 'CAPTCHA_UNUSUAL_ACTIVITY'
+    || workerPauseReason === 'STALE_QUEUE'
+  )
 
   // Poll worker status
   useEffect(() => {
     if (!isConnected) return
     const interval = setInterval(async () => {
       try {
-        const res = await fetchAPI<{ paused: boolean; active_count: number; captcha_cooldown_until: string | null }>('/api/requests/worker-status')
+        const res = await fetchAPI<{
+          paused: boolean
+          pause_reason?: string | null
+          can_auto_resume_after_flow_key?: boolean
+          active_count: number
+          queue_count?: number
+          extension_connected?: boolean
+          flow_key_present?: boolean
+        }>('/api/requests/worker-status')
         setWorkerPaused(res.paused)
-        setActiveRequestsCount(res.active_count)
-        setCaptchaCooldownUntil(res.captcha_cooldown_until)
+        setWorkerPauseReason(res.pause_reason ?? null)
+        setQueueRequestsCount(res.queue_count ?? res.active_count)
+        setWorkerFlowKeyPresent(!!res.flow_key_present)
+        setCanAutoResumeAfterFlowKey(!!res.can_auto_resume_after_flow_key)
       } catch (err) {
         console.error(err)
       }
@@ -107,10 +127,28 @@ function Layout() {
 
   const handlePauseResume = async () => {
     try {
+      if (workerPaused && !flowSessionReady) {
+        if (isElectron && window.electronAPI) {
+          const result = await window.electronAPI.openBrowser(GOOGLE_FLOW_URL)
+          if (!result.ok) throw new Error(result.error || 'Không thể mở Google Flow')
+          navigate('/browser')
+          return
+        }
+        navigate('/browser')
+        return
+      }
+      if (resumeNeedsCleanup) {
+        const detail = workerPauseReason === 'CAPTCHA_UNUSUAL_ACTIVITY'
+          ? 'Queue đã bị Google đánh dấu unusual activity. Hãy dừng các request cũ trước khi chạy lại để tránh captcha.'
+          : workerPauseReason === 'STALE_QUEUE'
+            ? 'Queue này còn từ phiên app trước. Hãy dừng các request cũ hoặc tạo batch mới sau khi dọn queue.'
+          : 'Queue này thuộc phiên Flow cũ. Hãy dừng các request cũ hoặc tạo batch mới để tránh chạy nhầm backlog.'
+        alert(detail)
+        return
+      }
       const endpoint = workerPaused ? '/api/requests/resume' : '/api/requests/pause'
       const res = await postAPI<{ paused: boolean }>(endpoint, {})
       setWorkerPaused(res.paused)
-      if (!res.paused) setCaptchaCooldownUntil(null)
     } catch (err) {
       alert('Không thể cập nhật trạng thái Agent: ' + err)
     }
@@ -312,23 +350,25 @@ function Layout() {
             </span>
           </div>
           <div className="flex items-center gap-2">
-            {extensionConnected
+            {extensionConnected && flowSessionReady
               ? <PlugZap size={13} color="var(--green)" />
-              : <Plug size={13} color="var(--yellow)" />
+              : <Plug size={13} color={extensionConnected ? 'var(--yellow)' : 'var(--red)'} />
             }
-            <span style={{ fontSize: 12, color: extensionConnected ? 'var(--green)' : 'var(--yellow)' }}>
-              {extensionConnected ? 'Extension OK' : 'Chưa kết nối'}
+            <span
+              style={{
+                fontSize: 12,
+                color: extensionConnected && flowSessionReady
+                  ? 'var(--green)'
+                  : extensionConnected
+                    ? 'var(--yellow)'
+                    : 'var(--red)',
+              }}
+            >
+              {extensionConnected
+                ? flowSessionReady ? 'Flow session OK' : 'Cần mở Flow/login'
+                : 'Chưa kết nối'}
             </span>
           </div>
-          {captchaCooldownUntil && (
-            <div className="flex items-center gap-2">
-              <Clock size={13} color="var(--yellow)" />
-              <span style={{ fontSize: 12, color: 'var(--yellow)' }}>
-                Cooldown đến {new Date(captchaCooldownUntil).toLocaleTimeString()}
-              </span>
-            </div>
-          )}
-
           {isConnected && (
             <div className="flex flex-col gap-1.5 mt-2 pt-2" style={{ borderTop: '1px dashed var(--border-subtle)' }}>
               <button
@@ -341,8 +381,12 @@ function Layout() {
                   cursor: 'pointer'
                 }}
               >
-                <Zap size={11} className={workerPaused ? '' : 'animate-pulse'} />
-                {workerPaused ? 'Tiếp tục chạy' : 'Tạm dừng Agent'}
+                {workerPaused && !flowSessionReady
+                  ? <Globe size={11} />
+                  : <Zap size={11} className={workerPaused ? '' : 'animate-pulse'} />}
+                {workerPaused
+                  ? flowSessionReady ? resumeNeedsCleanup ? 'Cần dọn queue' : 'Tiếp tục chạy' : 'Mở Flow/login'
+                  : 'Tạm dừng Agent'}
               </button>
               <button
                 onClick={handleCancelAll}
@@ -355,7 +399,7 @@ function Layout() {
                 }}
               >
                 <WifiOff size={11} />
-                Dừng tất cả ({activeRequestsCount})
+                Dừng tất cả ({queueRequestsCount})
               </button>
             </div>
           )}

@@ -7,6 +7,13 @@ from agent.services.flow_client import get_flow_client
 router = APIRouter(prefix="/flow", tags=["flow"])
 
 
+def _ensure_flow_session(client):
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    if not client.flow_key_present:
+        raise HTTPException(409, "Flow session not ready — open/login to Google Flow first")
+
+
 class GenerateImageRequest(BaseModel):
     prompt: str
     project_id: str
@@ -65,7 +72,7 @@ async def extension_status():
     client = get_flow_client()
     return {
         "connected": client.connected,
-        "flow_key_present": client._flow_key is not None,
+        "flow_key_present": client.flow_key_present,
     }
 
 
@@ -76,17 +83,34 @@ async def get_credits():
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
     result = await client.get_credits()
+    if result.get("status") == 401:
+        client.clear_flow_key("credits_401")
+    if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
+        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+    return result.get("data", result)
+
+
+@router.post("/refresh-token")
+async def refresh_token(reload: bool = True):
+    """Ask the extension to reload/open Google Flow and recapture the session token."""
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    result = await client.refresh_token(reload_tab=reload)
     if result.get("error"):
         raise HTTPException(502, result["error"])
-    return result.get("data", result)
+    return {
+        "ok": True,
+        "flow_key_present": client.flow_key_present,
+        **result,
+    }
 
 
 @router.post("/generate-image")
 async def generate_image(body: GenerateImageRequest):
     """Generate image directly (bypasses queue)."""
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
+    _ensure_flow_session(client)
     result = await client.generate_images(**body.model_dump())
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
@@ -97,8 +121,7 @@ async def generate_image(body: GenerateImageRequest):
 async def generate_video(body: GenerateVideoRequest):
     """Submit video generation (returns operations for polling)."""
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
+    _ensure_flow_session(client)
     result = await client.generate_video(**body.model_dump(exclude_none=True))
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
@@ -109,8 +132,7 @@ async def generate_video(body: GenerateVideoRequest):
 async def generate_video_refs(body: GenerateVideoRefsRequest):
     """Submit r2v video generation from reference images."""
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
+    _ensure_flow_session(client)
     result = await client.generate_video_from_references(**body.model_dump())
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
@@ -121,8 +143,7 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
 async def upscale_video(body: UpscaleVideoRequest):
     """Submit video upscale (returns operations for polling)."""
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
+    _ensure_flow_session(client)
     result = await client.upscale_video(**body.model_dump())
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
@@ -133,8 +154,7 @@ async def upscale_video(body: UpscaleVideoRequest):
 async def check_status(body: CheckStatusRequest):
     """Check video generation status."""
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
+    _ensure_flow_session(client)
     result = await client.check_video_status(body.operations)
     if result.get("error"):
         raise HTTPException(502, result["error"])
@@ -145,8 +165,7 @@ async def check_status(body: CheckStatusRequest):
 async def refresh_project_urls(project_id: str):
     """Bulk refresh all media URLs for a project via per-media get_media calls."""
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
+    _ensure_flow_session(client)
     result = await client.refresh_project_urls(project_id)
     if result.get("error"):
         raise HTTPException(502, result["error"])
@@ -161,8 +180,7 @@ async def get_media(media_id: str):
     Use this to refresh expired GCS signed URLs.
     """
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
+    _ensure_flow_session(client)
     result = await client.get_media(media_id)
     if result.get("error"):
         raise HTTPException(502, result["error"])
@@ -176,8 +194,7 @@ async def get_media(media_id: str):
 async def edit_image(body: EditImageRequest):
     """Edit an existing image using IMAGE_INPUT_TYPE_BASE_IMAGE (bypasses queue)."""
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
+    _ensure_flow_session(client)
     result = await client.edit_image(
         body.prompt, body.source_media_id, body.project_id,
         aspect_ratio=body.aspect_ratio,
@@ -193,8 +210,7 @@ async def upload_image(body: UploadImageRequest):
     """Upload a local image file to Google Flow and get a media_id."""
     import base64, mimetypes
     client = get_flow_client()
-    if not client.connected:
-        raise HTTPException(503, "Extension not connected")
+    _ensure_flow_session(client)
     try:
         with open(body.file_path, "rb") as f:
             image_bytes = f.read()

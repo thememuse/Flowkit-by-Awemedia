@@ -61,6 +61,19 @@ logger = logging.getLogger(__name__)
 _LANDSCAPE_ENTITY_TYPES = {"location"}
 
 
+async def _ensure_queue_submission_allowed():
+    """Keep SDK queue helpers aligned with /api/requests guards."""
+    from agent.api.requests import (
+        _ensure_flow_session_ready,
+        _ensure_queue_accepts_new_work,
+        _ensure_recent_captcha_allows_new_work,
+    )
+
+    _ensure_queue_accepts_new_work()
+    _ensure_flow_session_ready()
+    await _ensure_recent_captcha_allows_new_work()
+
+
 def _reference_aspect_ratio(entity_type: str) -> str:
     """Pick aspect ratio based on entity type."""
     if entity_type in _LANDSCAPE_ENTITY_TYPES:
@@ -899,6 +912,7 @@ class OperationService:
     async def queue_scene_image(self, scene_id: str, project_id: str,
                                 video_id: str, orientation: str | None = None) -> str:
         """Queue a GENERATE_IMAGE request. Returns request id."""
+        await _ensure_queue_submission_allowed()
         orientation = await self._resolve_queue_orientation(video_id, orientation)
         row = await crud.create_request(
             req_type="GENERATE_IMAGE", orientation=orientation,
@@ -911,6 +925,7 @@ class OperationService:
                                      edit_prompt: str | None = None,
                                      source_media_id: str | None = None) -> str:
         """Queue an EDIT_IMAGE request. Returns request id."""
+        await _ensure_queue_submission_allowed()
         orientation = await self._resolve_queue_orientation(video_id, orientation)
         row = await crud.create_request(
             req_type="EDIT_IMAGE", orientation=orientation,
@@ -922,6 +937,7 @@ class OperationService:
     async def queue_scene_video(self, scene_id: str, project_id: str,
                                 video_id: str, orientation: str | None = None) -> str:
         """Queue a GENERATE_VIDEO request. Returns request id."""
+        await _ensure_queue_submission_allowed()
         orientation = await self._resolve_queue_orientation(video_id, orientation)
         row = await crud.create_request(
             req_type="GENERATE_VIDEO", orientation=orientation,
@@ -932,6 +948,7 @@ class OperationService:
     async def queue_scene_video_refs(self, scene_id: str, project_id: str,
                                      video_id: str, orientation: str | None = None) -> str:
         """Queue a GENERATE_VIDEO_REFS request. Returns request id."""
+        await _ensure_queue_submission_allowed()
         orientation = await self._resolve_queue_orientation(video_id, orientation)
         row = await crud.create_request(
             req_type="GENERATE_VIDEO_REFS", orientation=orientation,
@@ -942,6 +959,7 @@ class OperationService:
     async def queue_upscale_video(self, scene_id: str, project_id: str,
                                   video_id: str, orientation: str | None = None) -> str:
         """Queue an UPSCALE_VIDEO request. Returns request id."""
+        await _ensure_queue_submission_allowed()
         orientation = await self._resolve_queue_orientation(video_id, orientation)
         row = await crud.create_request(
             req_type="UPSCALE_VIDEO", orientation=orientation,
@@ -951,6 +969,7 @@ class OperationService:
 
     async def queue_reference_image(self, character_id: str, project_id: str) -> str:
         """Queue a GENERATE_CHARACTER_IMAGE request. Returns request id."""
+        await _ensure_queue_submission_allowed()
         row = await crud.create_request(
             req_type="GENERATE_CHARACTER_IMAGE",
             character_id=character_id, project_id=project_id,
@@ -960,6 +979,7 @@ class OperationService:
     async def queue_regenerate_scene_image(self, scene_id: str, project_id: str,
                                            video_id: str, orientation: str | None = None) -> str:
         """Queue a REGENERATE_IMAGE request (bypasses skip check). Returns request id."""
+        await _ensure_queue_submission_allowed()
         orientation = await self._resolve_queue_orientation(video_id, orientation)
         row = await crud.create_request(
             req_type="REGENERATE_IMAGE", orientation=orientation,
@@ -969,6 +989,7 @@ class OperationService:
 
     async def queue_regenerate_character_image(self, character_id: str, project_id: str) -> str:
         """Queue a REGENERATE_CHARACTER_IMAGE request (clears existing, regenerates). Returns request id."""
+        await _ensure_queue_submission_allowed()
         row = await crud.create_request(
             req_type="REGENERATE_CHARACTER_IMAGE",
             character_id=character_id, project_id=project_id,
@@ -983,6 +1004,7 @@ class OperationService:
                                          edit_prompt: str | None = None,
                                          source_media_id: str | None = None) -> str:
         """Queue an EDIT_CHARACTER_IMAGE request. Returns request id."""
+        await _ensure_queue_submission_allowed()
         row = await crud.create_request(
             req_type="EDIT_CHARACTER_IMAGE",
             character_id=character_id, project_id=project_id,

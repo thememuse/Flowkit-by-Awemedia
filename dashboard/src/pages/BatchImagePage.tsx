@@ -18,6 +18,9 @@ interface BatchStatus {
   failed: number
   done: boolean
   all_succeeded: boolean
+  worker_paused?: boolean
+  blocked?: boolean
+  last_error?: string | null
 }
 
 export default function BatchImagePage() {
@@ -226,6 +229,13 @@ export default function BatchImagePage() {
           `/api/requests/batch-status?${queryParam}&type=${type}&since=${encodeURIComponent(since)}`
         )
         setBatchStatus(s)
+        if (s.blocked) {
+          if (pollRef.current) clearInterval(pollRef.current)
+          setBatchRunning(false)
+          setBatchType(null)
+          loadData(true)
+          return
+        }
         if (s.done) {
           if (pollRef.current) clearInterval(pollRef.current)
           setBatchRunning(false)
@@ -806,19 +816,30 @@ export default function BatchImagePage() {
         </div>
 
         {/* Batch Status Overlay if running */}
-        {batchRunning && batchStatus && (
-          <div className="p-3 rounded-lg flex flex-col gap-1.5" style={{ background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.15)' }}>
-            <div className="flex justify-between text-xs" style={{ color: 'var(--green)' }}>
+        {batchStatus && (batchRunning || batchStatus.blocked) && (
+          <div
+            className="p-3 rounded-lg flex flex-col gap-1.5"
+            style={{
+              background: batchStatus.blocked ? 'rgba(239,68,68,0.06)' : 'rgba(34,197,94,0.06)',
+              border: `1px solid ${batchStatus.blocked ? 'rgba(239,68,68,0.2)' : 'rgba(34,197,94,0.15)'}`,
+            }}
+          >
+            <div className="flex justify-between text-xs" style={{ color: batchStatus.blocked ? 'var(--red)' : 'var(--green)' }}>
               <span className="font-semibold flex items-center gap-1">
-                <Loader2 size={11} className="spin" /> Đang tạo hàng loạt: {batchStatus.completed}/{batchStatus.total} xong
+                {batchStatus.blocked ? <AlertCircle size={11} /> : <Loader2 size={11} className="spin" />}
+                {batchStatus.blocked
+                  ? `Tạm dừng: ${batchStatus.last_error || 'Worker paused'}`
+                  : `Đang tạo hàng loạt: ${batchStatus.completed}/${batchStatus.total} xong`}
               </span>
-              <button
-                onClick={cancelAllActive}
-                className="flex items-center gap-1 px-2 py-0.5 rounded border text-[10px]"
-                style={{ borderColor: 'rgba(239,68,68,0.4)', color: 'var(--red)', background: 'rgba(239,68,68,0.06)' }}
-              >
-                <XCircle size={10} /> Dừng
-              </button>
+              {batchRunning && (
+                <button
+                  onClick={cancelAllActive}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded border text-[10px]"
+                  style={{ borderColor: 'rgba(239,68,68,0.4)', color: 'var(--red)', background: 'rgba(239,68,68,0.06)' }}
+                >
+                  <XCircle size={10} /> Dừng
+                </button>
+              )}
             </div>
             <div className="rounded-full overflow-hidden" style={{ height: 4, background: 'var(--surface)' }}>
               <div

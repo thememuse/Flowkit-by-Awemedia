@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from agent.sdk.services import operations as ops_module
@@ -299,7 +300,9 @@ class TestQueueWrappers:
     @pytest.mark.asyncio
     async def test_queue_scene_image_creates_generate_image_request(self, service):
         """queue_scene_image creates a GENERATE_IMAGE request in the DB and returns its id."""
-        with patch("agent.sdk.services.operations.crud") as mock_crud:
+        with patch("agent.sdk.services.operations.crud") as mock_crud, \
+             patch("agent.sdk.services.operations._ensure_queue_submission_allowed",
+                   new_callable=AsyncMock):
             mock_crud.create_request = AsyncMock(return_value={"id": "req-001"})
 
             req_id = await service.queue_scene_image(SCENE_ID, PROJECT_ID, VIDEO_ID, "VERTICAL")
@@ -313,7 +316,9 @@ class TestQueueWrappers:
     @pytest.mark.asyncio
     async def test_queue_scene_video_creates_generate_video_request(self, service):
         """queue_scene_video creates a GENERATE_VIDEO request in the DB and returns its id."""
-        with patch("agent.sdk.services.operations.crud") as mock_crud:
+        with patch("agent.sdk.services.operations.crud") as mock_crud, \
+             patch("agent.sdk.services.operations._ensure_queue_submission_allowed",
+                   new_callable=AsyncMock):
             mock_crud.create_request = AsyncMock(return_value={"id": "req-002"})
 
             req_id = await service.queue_scene_video(SCENE_ID, PROJECT_ID, VIDEO_ID, "VERTICAL")
@@ -327,7 +332,9 @@ class TestQueueWrappers:
     @pytest.mark.asyncio
     async def test_queue_upscale_video_creates_upscale_video_request(self, service):
         """queue_upscale_video creates an UPSCALE_VIDEO request in the DB and returns its id."""
-        with patch("agent.sdk.services.operations.crud") as mock_crud:
+        with patch("agent.sdk.services.operations.crud") as mock_crud, \
+             patch("agent.sdk.services.operations._ensure_queue_submission_allowed",
+                   new_callable=AsyncMock):
             mock_crud.create_request = AsyncMock(return_value={"id": "req-003"})
 
             req_id = await service.queue_upscale_video(SCENE_ID, PROJECT_ID, VIDEO_ID, "VERTICAL")
@@ -341,7 +348,9 @@ class TestQueueWrappers:
     @pytest.mark.asyncio
     async def test_generate_character_image_delegates_to_queue_reference_image(self, service):
         """generate_character_image alias delegates to queue_reference_image (GENERATE_CHARACTER_IMAGE)."""
-        with patch("agent.sdk.services.operations.crud") as mock_crud:
+        with patch("agent.sdk.services.operations.crud") as mock_crud, \
+             patch("agent.sdk.services.operations._ensure_queue_submission_allowed",
+                   new_callable=AsyncMock):
             mock_crud.create_request = AsyncMock(return_value={"id": "req-004"})
 
             req_id = await service.generate_character_image(CHAR_ID, PROJECT_ID)
@@ -351,6 +360,21 @@ class TestQueueWrappers:
             req_type="GENERATE_CHARACTER_IMAGE",
             character_id=CHAR_ID, project_id=PROJECT_ID,
         )
+
+    @pytest.mark.asyncio
+    async def test_queue_scene_image_rejects_missing_flow_session_before_db_write(self, service):
+        """SDK queue helpers must not bypass Flow session guards."""
+        with patch("agent.sdk.services.operations.crud") as mock_crud, \
+             patch("agent.sdk.services.operations._ensure_queue_submission_allowed",
+                   new_callable=AsyncMock) as mock_guard:
+            mock_crud.create_request = AsyncMock()
+            mock_guard.side_effect = HTTPException(409, "Flow session not ready")
+
+            with pytest.raises(HTTPException) as exc:
+                await service.queue_scene_image(SCENE_ID, PROJECT_ID, VIDEO_ID, "VERTICAL")
+
+        assert exc.value.status_code == 409
+        mock_crud.create_request.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

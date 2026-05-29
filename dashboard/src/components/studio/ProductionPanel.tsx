@@ -17,7 +17,7 @@ import {
 } from 'lucide-react'
 import { fetchAPI, postAPI } from '../../api/client'
 import { useWebSocket } from '../../api/useWebSocket'
-import type { Scene, Character, Request, StatusType } from '../../types'
+import type { Scene, Character, StatusType } from '../../types'
 
 // ── Types ──────────────────────────────────────────────────
 interface BatchStatus {
@@ -28,6 +28,9 @@ interface BatchStatus {
   failed: number
   done: boolean
   all_succeeded: boolean
+  worker_paused?: boolean
+  blocked?: boolean
+  last_error?: string | null
 }
 
 interface VoiceTemplate {
@@ -269,20 +272,6 @@ interface Props {
 
 type StepKey = 'refs' | 'images' | 'videos' | 'tts' | 'export'
 
-function batchPollSince(requests: Request[], fallback: string) {
-  const created = requests.map(r => r.created_at).filter(Boolean).sort()
-  return created[0] || fallback
-}
-
-function retryHoldMessage(requests: Request[]) {
-  const retryTimes = requests
-    .filter(r => r.status === 'PENDING' && r.next_retry_at)
-    .map(r => r.next_retry_at as string)
-    .sort()
-  if (!retryTimes.length) return null
-  return `Worker đang chờ cooldown đến ${new Date(retryTimes[0]).toLocaleTimeString()} trước khi gửi sang extension`
-}
-
 export default function ProductionPanel({ projectId, videoId, orientation, onLog, onRunningChange }: Props) {
   const [chars, setChars] = useState<Character[]>([])
   const [scenes, setScenes] = useState<Scene[]>([])
@@ -348,6 +337,14 @@ export default function ProductionPanel({ projectId, videoId, orientation, onLog
           `/api/requests/batch-status?${queryParam}&type=${jobType}&since=${encodeURIComponent(since)}`
         )
         setJobStatus(prev => ({ ...prev, [stepKey]: s }))
+        if (s.blocked) {
+          clearInterval(pollRefs.current[stepKey])
+          onLog(`⏸ ${jobType} tạm dừng: ${s.last_error || 'Worker paused'}`)
+          load()
+          setActiveJobs(prev => { const n = { ...prev }; delete n[stepKey]; return n })
+          setJobMeta(prev => { const n = { ...prev }; delete n[stepKey]; return n })
+          return
+        }
         if (s.done) {
           clearInterval(pollRefs.current[stepKey])
           onLog(s.all_succeeded
@@ -432,7 +429,7 @@ export default function ProductionPanel({ projectId, videoId, orientation, onLog
     setLoading(p => ({ ...p, refs: true }))
     try {
       const since = new Date().toISOString()
-      const submitted = await postAPI<Request[]>('/api/requests/batch', {
+      await postAPI('/api/requests/batch', {
         requests: missing.map(c => ({
           type: 'GENERATE_CHARACTER_IMAGE',
           character_id: c.id,
@@ -440,10 +437,8 @@ export default function ProductionPanel({ projectId, videoId, orientation, onLog
           orientation: c.entity_type === 'location' ? 'HORIZONTAL' : 'VERTICAL',
         }))
       })
-      const hold = retryHoldMessage(submitted)
-      if (hold) onLog(hold)
       onLog(`Gửi ${missing.length} requests tạo ảnh tham chiếu`)
-      startPoll('refs', 'GENERATE_CHARACTER_IMAGE', `project_id=${projectId}`, batchPollSince(submitted, since))
+      startPoll('refs', 'GENERATE_CHARACTER_IMAGE', `project_id=${projectId}`, since)
     } catch (e: unknown) {
       onLog(`Lỗi: ${e instanceof Error ? e.message : e}`)
     } finally {
@@ -467,7 +462,7 @@ export default function ProductionPanel({ projectId, videoId, orientation, onLog
     setLoading(p => ({ ...p, images: true }))
     try {
       const since = new Date().toISOString()
-      const submitted = await postAPI<Request[]>('/api/requests/batch', {
+      await postAPI('/api/requests/batch', {
         requests: need.map(s => ({
           type: 'GENERATE_IMAGE',
           scene_id: s.id,
@@ -476,10 +471,8 @@ export default function ProductionPanel({ projectId, videoId, orientation, onLog
           orientation,
         }))
       })
-      const hold = retryHoldMessage(submitted)
-      if (hold) onLog(hold)
       onLog(`Gửi ${need.length} requests tạo ảnh cảnh`)
-      startPoll('images', 'GENERATE_IMAGE', `video_id=${videoId}`, batchPollSince(submitted, since))
+      startPoll('images', 'GENERATE_IMAGE', `video_id=${videoId}`, since)
     } catch (e: unknown) {
       onLog(`Lỗi: ${e instanceof Error ? e.message : e}`)
     } finally {
@@ -514,7 +507,7 @@ export default function ProductionPanel({ projectId, videoId, orientation, onLog
     setLoading(p => ({ ...p, videos: true }))
     try {
       const since = new Date().toISOString()
-      const submitted = await postAPI<Request[]>('/api/requests/batch', {
+      await postAPI('/api/requests/batch', {
         requests: need.map(s => ({
           type: 'GENERATE_VIDEO',
           scene_id: s.id,
@@ -523,10 +516,8 @@ export default function ProductionPanel({ projectId, videoId, orientation, onLog
           orientation,
         }))
       })
-      const hold = retryHoldMessage(submitted)
-      if (hold) onLog(hold)
       onLog(`Gửi ${need.length} requests tạo video${alreadyProcessing > 0 ? ` (+${alreadyProcessing} đang xử lý)` : ''} • 2-5 phút/cảnh`)
-      startPoll('videos', 'GENERATE_VIDEO', `video_id=${videoId}`, batchPollSince(submitted, since))
+      startPoll('videos', 'GENERATE_VIDEO', `video_id=${videoId}`, since)
     } catch (e: unknown) {
       onLog(`Lỗi: ${e instanceof Error ? e.message : e}`)
     } finally {

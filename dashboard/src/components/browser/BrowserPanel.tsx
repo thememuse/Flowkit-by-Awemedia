@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react'
 import type { BrowserStatus } from '../../types/electron'
+import { useHealthStatus } from '../../api/useHealthStatus'
+import { postAPI } from '../../api/client'
 
 const GOOGLE_FLOW_URL = 'https://labs.google/fx/tools/flow'
 
@@ -7,6 +9,7 @@ export default function BrowserPanel() {
   const [status, setStatus] = useState<BrowserStatus>({ open: false, url: null, loggedIn: false })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const { extensionConnected, flowKeyPresent } = useHealthStatus()
 
   const electronAPI = window.electronAPI
 
@@ -40,6 +43,18 @@ export default function BrowserPanel() {
     setLoading(true)
     try {
       await electronAPI?.closeBrowser()
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleLamMoiSession = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      await postAPI('/api/flow/refresh-token?reload=true', {})
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Không thể làm mới Flow session')
     } finally {
       setLoading(false)
     }
@@ -84,14 +99,14 @@ export default function BrowserPanel() {
           <div style={{
             width: 10, height: 10, borderRadius: '50%', flexShrink: 0,
             background: status.open
-              ? (status.loggedIn ? 'var(--green)' : '#f59e0b')
+              ? (flowKeyPresent ? 'var(--green)' : '#f59e0b')
               : 'var(--muted)',
             boxShadow: status.open ? '0 0 8px currentColor' : 'none',
           }} />
           <div>
             <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
               {status.open
-                ? (status.loggedIn ? '✓ Đã đăng nhập Google' : '⚠ Chưa đăng nhập')
+                ? (flowKeyPresent ? 'Flow session sẵn sàng' : 'Cần mở Google Flow/login')
                 : 'Trình duyệt đang đóng'}
             </div>
             {status.url && (
@@ -102,8 +117,8 @@ export default function BrowserPanel() {
           </div>
         </div>
 
-        {/* Hướng dẫn khi chưa đăng nhập */}
-        {status.open && !status.loggedIn && (
+        {/* Hướng dẫn khi chưa có Flow session */}
+        {status.open && !flowKeyPresent && (
           <div style={{
             padding: '10px 12px',
             borderRadius: 7,
@@ -113,13 +128,13 @@ export default function BrowserPanel() {
             color: '#f59e0b',
             lineHeight: 1.6,
           }}>
-            📌 Vui lòng đăng nhập vào tài khoản Google trong cửa sổ trình duyệt.<br />
-            Flow Kit sẽ lưu phiên đăng nhập để không cần đăng nhập lại.
+            Mở trang Google Flow trong cửa sổ trình duyệt và đăng nhập nếu cần.<br />
+            Khi Flow tải xong, extension sẽ bắt session token và trạng thái này sẽ chuyển xanh.
           </div>
         )}
 
-        {/* Thông báo đã đăng nhập */}
-        {status.open && status.loggedIn && (
+        {/* Thông báo Flow session đã sẵn sàng */}
+        {status.open && flowKeyPresent && (
           <div style={{
             padding: '10px 12px',
             borderRadius: 7,
@@ -129,7 +144,7 @@ export default function BrowserPanel() {
             color: 'var(--green)',
             lineHeight: 1.6,
           }}>
-            ✓ Extension đã kết nối và sẵn sàng. Flow Kit có thể tạo ảnh/video qua Google Flow.
+            Extension đã kết nối và có Flow session. Flow Kit có thể tạo ảnh/video qua Google Flow.
           </div>
         )}
       </div>
@@ -199,6 +214,25 @@ export default function BrowserPanel() {
             >
               Đóng trình duyệt
             </button>
+            {!flowKeyPresent && (
+              <button
+                onClick={handleLamMoiSession}
+                disabled={loading || !extensionConnected}
+                style={{
+                  flex: 1,
+                  padding: '9px 14px',
+                  borderRadius: 8,
+                  background: 'var(--card)',
+                  color: extensionConnected ? '#f59e0b' : 'var(--muted)',
+                  border: `1px solid ${extensionConnected ? 'rgba(245,158,11,0.45)' : 'var(--border)'}`,
+                  cursor: loading || !extensionConnected ? 'not-allowed' : 'pointer',
+                  fontSize: 12,
+                  fontWeight: 600,
+                }}
+              >
+                Làm mới session
+              </button>
+            )}
           </>
         )}
       </div>
@@ -233,6 +267,14 @@ export default function BrowserPanel() {
           Extension được tự động tải vào trình duyệt Chromium khi bạn nhấn "Mở Google Flow".<br />
           Extension kết nối với Flow Kit Agent qua{' '}
           <code style={{ color: 'var(--accent)', fontSize: 10 }}>ws://127.0.0.1:9222</code>.
+        </div>
+        <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 11 }}>
+          <span style={{ color: extensionConnected ? 'var(--green)' : '#f59e0b' }}>
+            Extension: {extensionConnected ? 'connected' : 'not connected'}
+          </span>
+          <span style={{ color: flowKeyPresent ? 'var(--green)' : '#f59e0b' }}>
+            Flow session: {flowKeyPresent ? 'ready' : 'missing'}
+          </span>
         </div>
 
         <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)', display: 'flex', gap: 8 }}>
@@ -271,7 +313,7 @@ export default function BrowserPanel() {
           <li>Nhấn <strong style={{ color: 'var(--text)' }}>Mở Google Flow</strong> để khởi động trình duyệt</li>
           <li>Đăng nhập tài khoản Google trong cửa sổ trình duyệt</li>
           <li>Flow Kit sẽ tự động lưu session đăng nhập</li>
-          <li>Extension sẽ kết nối tự động — đèn chuyển xanh là sẵn sàng</li>
+          <li>Đợi Flow session chuyển xanh trước khi tạo ảnh/video</li>
           <li>Quay lại Flow Kit và bắt đầu tạo video!</li>
         </ol>
       </div>

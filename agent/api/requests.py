@@ -21,6 +21,83 @@ def _adjust_since(since_str: str) -> str:
         return since_str
 
 
+def _ensure_flow_session_ready():
+    """Reject new media work before it can become a stuck progress bar."""
+    try:
+        from agent.services.flow_client import get_flow_client
+        client = get_flow_client()
+        if not client.connected:
+            raise HTTPException(409, "Extension not connected — open Flow browser first")
+        if not client.flow_key_present:
+            raise HTTPException(409, "Flow session not ready — open/login to Google Flow first")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(503, f"Flow session check unavailable: {exc}")
+
+
+def _ensure_queue_accepts_new_work():
+    """Fail fast when a stale/captcha-paused queue would keep new work stuck."""
+    try:
+        from agent.services.flow_client import get_flow_client
+        from agent.worker.processor import get_worker_controller
+        client = get_flow_client()
+        controller = get_worker_controller()
+        if not getattr(controller, "paused", False):
+            return
+        if controller.pause_reason == "CAPTCHA_UNUSUAL_ACTIVITY":
+            raise HTTPException(
+                409,
+                "Worker is paused after reCAPTCHA unusual activity. Cancel stale requests before submitting new work.",
+            )
+        if controller.pause_reason == "STALE_QUEUE":
+            raise HTTPException(
+                409,
+                "Worker is holding a queue from a previous app session. Cancel stale requests before submitting new work.",
+            )
+        if controller.pause_reason == "NO_FLOW_KEY" and not controller.can_auto_resume_after_flow_key():
+            raise HTTPException(
+                409,
+                "Worker is holding a stale queue from an older Flow session. Cancel stale requests before submitting new work.",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        # Do not block request creation if worker coordination is unavailable.
+        return
+
+
+async def _ensure_recent_captcha_allows_new_work():
+    for row in await crud.list_requests():
+        error = (row.get("error_message") or "").lower()
+        if not _is_unusual_activity_message(error):
+            continue
+        ts = row.get("updated_at") or row.get("created_at")
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if datetime.now(dt.tzinfo) - dt <= timedelta(minutes=30):
+            raise HTTPException(
+                409,
+                "Recent reCAPTCHA unusual activity is recorded. Wait 30 minutes, refresh the Flow browser session, then retry later.",
+            )
+
+
+def _is_unusual_activity_message(message: str) -> bool:
+    return "public_error_unusual_activity" in message or "unusual_activity" in message
+
+
+def _cancel_error_message(request: dict) -> str:
+    """Keep unusual-activity evidence so submit guards can enforce cooldown."""
+    existing = request.get("error_message") or ""
+    if _is_unusual_activity_message(existing.lower()):
+        return f"{existing} | Cancelled by user"
+    return "Cancelled by user"
+
+
 
 class RequestUpdate(BaseModel):
     status: Optional[StatusType] = None
@@ -43,10 +120,16 @@ class BatchStatus(BaseModel):
     done: bool
     all_succeeded: bool
     orientation: Optional[str] = None
+    worker_paused: bool = False
+    blocked: bool = False
+    last_error: Optional[str] = None
 
 
 @router.post("", response_model=Request)
 async def create(body: RequestCreate):
+    _ensure_queue_accepts_new_work()
+    _ensure_flow_session_ready()
+    await _ensure_recent_captcha_allows_new_work()
     data = body.model_dump(exclude_none=True)
     data["req_type"] = data.pop("type")
 
@@ -71,16 +154,6 @@ async def create(body: RequestCreate):
     if vid and orient:
         await crud.update_video(vid, orientation=orient)
 
-    # Auto-resume worker if it was paused on new generation trigger
-    try:
-        from agent.worker.processor import get_worker_controller
-        controller = get_worker_controller()
-        if getattr(controller, "paused", False):
-            controller.resume()
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning("Could not auto-resume worker: %s", e)
-
     return await crud.create_request(**data)
 
 
@@ -88,6 +161,9 @@ async def create(body: RequestCreate):
 async def create_batch(body: BatchRequestCreate):
     """Submit multiple requests atomically. Server handles throttling (max 5 concurrent, 10s cooldown).
     Duplicate active requests for the same scene+type are skipped (not errors)."""
+    _ensure_queue_accepts_new_work()
+    _ensure_flow_session_ready()
+    await _ensure_recent_captcha_allows_new_work()
     # Auto-set video orientation from the batch (tracks current active orientation)
     _seen_vids: set[str] = set()
     for item in body.requests:
@@ -122,16 +198,6 @@ async def create_batch(body: BatchRequestCreate):
                 results.append(active[0])
                 continue
         results.append(await crud.create_request(**data))
-
-    # Auto-resume worker if it was paused on new generation trigger
-    try:
-        from agent.worker.processor import get_worker_controller
-        controller = get_worker_controller()
-        if getattr(controller, "paused", False):
-            controller.resume()
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning("Could not auto-resume worker: %s", e)
 
     return results
 
@@ -169,6 +235,35 @@ async def batch_status(video_id: str = None, project_id: str = None,
         s = r.get("status", "PENDING")
         counts[s] = counts.get(s, 0) + 1
     total = len(rows)
+    last_error = next(
+        (
+            r.get("error_message")
+            for r in rows
+            if r.get("error_message") and r.get("status") in ("PENDING", "PROCESSING", "FAILED")
+        ),
+        None,
+    )
+    try:
+        from agent.worker.processor import get_worker_controller
+        controller = get_worker_controller()
+        worker_paused = bool(getattr(controller, "paused", False))
+        worker_pause_reason = controller.pause_reason
+    except Exception:
+        worker_paused = False
+        worker_pause_reason = None
+    error_lower = (last_error or "").lower()
+    blocked = (
+        worker_paused
+        and counts["PENDING"] > 0
+        and (
+            "captcha" in error_lower
+            or "recaptcha" in error_lower
+            or "unusual_activity" in error_lower
+            or "no_flow_key" in error_lower
+            or "stale_queue" in error_lower
+            or worker_pause_reason == "STALE_QUEUE"
+        )
+    )
     return BatchStatus(
         total=total,
         pending=counts["PENDING"],
@@ -178,6 +273,9 @@ async def batch_status(video_id: str = None, project_id: str = None,
         failed=counts["FAILED"],
         done=(total > 0 and counts["PENDING"] == 0 and counts["PROCESSING"] == 0),
         all_succeeded=(counts["COMPLETED"] == total and total > 0),
+        worker_paused=worker_paused,
+        blocked=blocked,
+        last_error=last_error,
     )
 
 
@@ -185,31 +283,22 @@ async def batch_status(video_id: str = None, project_id: str = None,
 async def get_worker_status():
     """Get the current paused/active status of the worker."""
     from agent.worker.processor import get_worker_controller
+    from agent.services.flow_client import get_flow_client
     controller = get_worker_controller()
+    client = get_flow_client()
+    pending = await crud.list_requests(status="PENDING")
+    processing = await crud.list_requests(status="PROCESSING")
     return {
         "paused": getattr(controller, "_paused", False),
+        "pause_reason": controller.pause_reason,
+        "can_auto_resume_after_flow_key": controller.can_auto_resume_after_flow_key(),
         "active_count": controller.active_count,
-        "captcha_cooldown_until": controller.captcha_cooldown_until,
+        "pending_count": len(pending),
+        "processing_count": len(processing),
+        "queue_count": len(pending) + len(processing),
+        "extension_connected": client.connected,
+        "flow_key_present": client.flow_key_present,
     }
-
-
-@router.get("/{rid}", response_model=Request)
-async def get(rid: str):
-    r = await crud.get_request(rid)
-    if not r:
-        raise HTTPException(404, "Request not found")
-    return r
-
-
-@router.patch("/{rid}", response_model=Request)
-async def update(rid: str, body: RequestUpdate):
-    data = body.model_dump(exclude_unset=True)
-    if not data:
-        raise HTTPException(400, "No fields to update")
-    r = await crud.update_request(rid, **data)
-    if not r:
-        raise HTTPException(404, "Request not found")
-    return r
 
 
 @router.post("/{rid}/cancel")
@@ -219,7 +308,8 @@ async def cancel(rid: str):
         raise HTTPException(404, "Request not found")
     
     # 1. Update request status to FAILED
-    await crud.update_request(rid, status="FAILED", error_message="Cancelled by user")
+    cancel_error = _cancel_error_message(r)
+    await crud.update_request(rid, status="FAILED", error_message=cancel_error)
     
     # 2. Add to cancellation registry
     from agent.utils.cancel_registry import cancel_request
@@ -244,7 +334,7 @@ async def cancel(rid: str):
             
     # Notify event bus so the dashboard knows!
     from agent.services.event_bus import event_bus
-    await event_bus.emit("request_update", {"id": rid, "status": "FAILED", "error": "Cancelled by user"})
+    await event_bus.emit("request_update", {"id": rid, "status": "FAILED", "error": cancel_error})
     
     return {"status": "success", "message": f"Request {rid} cancelled"}
 
@@ -267,12 +357,13 @@ async def cancel_active(scene_id: str, type: str, orientation: Optional[str] = "
     
     for r in active:
         rid = r["id"]
+        cancel_error = _cancel_error_message(r)
         # Update request status to FAILED
-        await crud.update_request(rid, status="FAILED", error_message="Cancelled by user")
+        await crud.update_request(rid, status="FAILED", error_message=cancel_error)
         # Add to cancel registry
         cancel_request(rid)
         # Emit update
-        await event_bus.emit("request_update", {"id": rid, "status": "FAILED", "error": "Cancelled by user"})
+        await event_bus.emit("request_update", {"id": rid, "status": "FAILED", "error": cancel_error})
         
     # Update corresponding scene status
     updates = {}
@@ -293,6 +384,7 @@ async def cancel_all():
     """Cancel all active (PENDING and PROCESSING) requests globally."""
     from agent.utils.cancel_registry import cancel_request
     from agent.services.event_bus import event_bus
+    from agent.worker.processor import get_worker_controller
     
     # 1. Fetch all active requests
     pending = await crud.list_requests(status="PENDING")
@@ -302,9 +394,10 @@ async def cancel_all():
     # 2. Cancel each active request
     for r in active:
         rid = r["id"]
-        await crud.update_request(rid, status="FAILED", error_message="Cancelled by user")
+        cancel_error = _cancel_error_message(r)
+        await crud.update_request(rid, status="FAILED", error_message=cancel_error)
         cancel_request(rid)
-        await event_bus.emit("request_update", {"id": rid, "status": "FAILED", "error": "Cancelled by user"})
+        await event_bus.emit("request_update", {"id": rid, "status": "FAILED", "error": cancel_error})
         
         # 3. Update the corresponding scene status to FAILED
         scene_id = r.get("scene_id")
@@ -322,7 +415,11 @@ async def cancel_all():
                 updates[f"{prefix}_upscale_status"] = "FAILED"
             if updates:
                 await crud.update_scene(scene_id, **updates)
-                
+
+    controller = get_worker_controller()
+    if controller.pause_reason in ("STALE_QUEUE", "CAPTCHA_UNUSUAL_ACTIVITY", "NO_FLOW_KEY"):
+        controller.resume()
+
     return {"status": "success", "cancelled_count": len(active)}
 
 
@@ -331,15 +428,55 @@ async def pause_worker():
     """Pause the background worker loop from processing new requests."""
     from agent.worker.processor import get_worker_controller
     controller = get_worker_controller()
-    controller.pause()
-    return {"status": "success", "paused": True}
+    controller.pause("USER")
+    return {"status": "success", "paused": True, "pause_reason": controller.pause_reason}
 
 
 @router.post("/resume")
-async def resume_worker():
+async def resume_worker(force: bool = False):
     """Resume the background worker loop to process pending requests."""
     from agent.worker.processor import get_worker_controller
+    from agent.services.flow_client import get_flow_client
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(409, "Extension not connected — open Flow browser first")
+    if not client.flow_key_present:
+        raise HTTPException(409, "Flow session not ready — open/login to Google Flow first")
     controller = get_worker_controller()
+    if not force:
+        if controller.pause_reason == "CAPTCHA_UNUSUAL_ACTIVITY":
+            raise HTTPException(
+                409,
+                "Worker paused after reCAPTCHA unusual activity. Cancel stale requests or resume with force.",
+            )
+        if controller.pause_reason == "STALE_QUEUE":
+            raise HTTPException(
+                409,
+                "Worker is holding a queue from a previous app session. Cancel stale requests or resume with force.",
+            )
+        if controller.pause_reason == "NO_FLOW_KEY" and not controller.can_auto_resume_after_flow_key():
+            raise HTTPException(
+                409,
+                "Worker is holding a stale queue from an older Flow session. Cancel stale requests or resume with force.",
+            )
     controller.resume()
-    return {"status": "success", "paused": False}
+    return {"status": "success", "paused": False, "pause_reason": None}
 
+
+@router.get("/{rid}", response_model=Request)
+async def get(rid: str):
+    r = await crud.get_request(rid)
+    if not r:
+        raise HTTPException(404, "Request not found")
+    return r
+
+
+@router.patch("/{rid}", response_model=Request)
+async def update(rid: str, body: RequestUpdate):
+    data = body.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(400, "No fields to update")
+    r = await crud.update_request(rid, **data)
+    if not r:
+        raise HTTPException(404, "Request not found")
+    return r

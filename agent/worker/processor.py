@@ -8,7 +8,6 @@ import base64
 import json
 import logging
 import time
-from datetime import datetime, timezone
 
 import aiohttp
 
@@ -21,7 +20,6 @@ from agent.worker._parsing import _is_error
 from agent.sdk.services.result_handler import parse_result, apply_scene_result, apply_character_result
 
 logger = logging.getLogger(__name__)
-_captcha_cooldown_until = 0.0
 
 _API_CALL_TYPES = {"GENERATE_IMAGE", "REGENERATE_IMAGE", "EDIT_IMAGE",
                    "GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS", "UPSCALE_VIDEO",
@@ -34,6 +32,10 @@ _TYPE_PRIORITY = {
     "GENERATE_VIDEO": 2, "REGENERATE_VIDEO": 2, "GENERATE_VIDEO_REFS": 2,
     "UPSCALE_VIDEO": 3,
 }
+
+
+def _is_unusual_activity_error(error_lower: str) -> bool:
+    return "public_error_unusual_activity" in error_lower or "unusual_activity" in error_lower
 
 
 class APIRateLimiter:
@@ -62,11 +64,12 @@ class WorkerController:
     def __init__(self):
         self._shutdown = asyncio.Event()
         self._active_ids: set[str] = set()
-        self._active_video_ids: set[str] = set()  # Track active video request IDs
         self._rate_limiter = APIRateLimiter(MAX_CONCURRENT_REQUESTS, API_COOLDOWN)
         self._deferred: dict[str, float] = {}  # rid -> defer_until timestamp
         self._retry_after: dict[str, float] = {}  # rid -> retry_after timestamp
         self._paused = False
+        self._pause_reason: str | None = None
+        self._auto_resume_flow_key_until: float | None = None
 
     @property
     def active_count(self) -> int:
@@ -78,35 +81,56 @@ class WorkerController:
         return self._paused
 
     @property
-    def captcha_cooldown_until(self) -> str | None:
-        if _captcha_cooldown_until <= time.time():
-            return None
-        return _iso_from_epoch(_captcha_cooldown_until)
+    def pause_reason(self) -> str | None:
+        return self._pause_reason if self._paused else None
 
-    def pause(self):
+    def pause(self, reason: str = "USER"):
         self._paused = True
-        logger.info("Worker controller PAUSED")
+        self._pause_reason = reason
+        if reason != "NO_FLOW_KEY":
+            self._auto_resume_flow_key_until = None
+        logger.info("Worker controller PAUSED reason=%s", reason)
 
     def resume(self):
-        global _captcha_cooldown_until
         self._paused = False
-        _captcha_cooldown_until = 0.0
+        self._pause_reason = None
+        self._auto_resume_flow_key_until = None
         logger.info("Worker controller RESUMED")
+
+    def arm_flow_key_auto_resume(self, ttl_seconds: float = 600.0):
+        """Allow one missing-auth pause to resume after a fresh Flow token is captured."""
+        self._auto_resume_flow_key_until = time.time() + ttl_seconds
+        logger.info("Worker armed for Flow-key auto-resume for %.0fs", ttl_seconds)
+
+    def can_auto_resume_after_flow_key(self) -> bool:
+        """Return True only for recent user-initiated work, not stale backlog."""
+        return (
+            self._paused
+            and self._pause_reason == "NO_FLOW_KEY"
+            and self._auto_resume_flow_key_until is not None
+            and self._auto_resume_flow_key_until >= time.time()
+        )
 
     async def start(self):
         """Start the worker loop."""
         await self._cleanup_stale_processing()
-        
-        # Check if there are any PENDING requests in the database to prevent startup spam
+        await self._pause_if_existing_queue()
+        await self._run_loop()
+
+    async def _pause_if_existing_queue(self):
+        """Do not auto-run a persisted queue after app/browser restart."""
         try:
             pending = await crud.list_requests(status="PENDING")
-            if pending:
-                self._paused = True
-                logger.warning("Found %d pending requests on startup. Worker initialized in PAUSED state to prevent spam.", len(pending))
+            processing = await crud.list_requests(status="PROCESSING")
+            total = len(pending) + len(processing)
+            if total:
+                self.pause("STALE_QUEUE")
+                logger.warning(
+                    "Found %d existing queued request(s) on startup; worker paused to prevent stale queue replay",
+                    total,
+                )
         except Exception as e:
-            logger.warning("Could not check pending requests count on startup: %s", e)
-            
-        await self._run_loop()
+            logger.warning("Could not inspect queued requests on startup: %s", e)
 
     def request_shutdown(self):
         """Signal the worker to stop after current tasks drain."""
@@ -127,6 +151,7 @@ class WorkerController:
             for req in stale:
                 await crud.update_request(req["id"], status="PENDING",
                                           error_message="reset: stale PROCESSING on startup")
+                await _mark_scene_status(req, "PENDING")
                 logger.warning("Stale request reset: %s type=%s", req["id"][:8], req.get("type"))
             if stale:
                 logger.info("Cleaned up %d stale PROCESSING requests", len(stale))
@@ -147,16 +172,6 @@ class WorkerController:
                     continue
 
                 now = time.time()
-                if _captcha_cooldown_until > now:
-                    await event_bus.emit("worker_tick", {
-                        "active": len(self._active_ids),
-                        "slots": 0,
-                        "pending": 0,
-                        "captcha_cooldown_until": _iso_from_epoch(_captcha_cooldown_until),
-                    })
-                    await asyncio.sleep(min(POLL_INTERVAL, max(1, _captcha_cooldown_until - now)))
-                    continue
-
                 # Read dynamically from config module so settings changes take effect without restart
                 max_concurrent = _config.MAX_CONCURRENT_REQUESTS
                 slots_available = max_concurrent - len(self._active_ids)
@@ -179,16 +194,20 @@ class WorkerController:
                     logger.info("Worker: %d actionable, %d active, %d slots",
                                 len(pending), len(self._active_ids), slots_available)
 
+                if pending and not getattr(client, "flow_key_present", False):
+                    req = pending[0]
+                    await crud.update_request(req["id"], status="PENDING", error_message="NO_FLOW_KEY")
+                    await _mark_scene_status(req, "PENDING")
+                    self.pause("NO_FLOW_KEY")
+                    logger.warning(
+                        "Worker blocked before dispatch: Flow key missing; open/login to Google Flow, then resume"
+                    )
+                    continue
+
                 for req in pending:
                     if slots_available <= 0:
                         break
                     rid = req["id"]
-                    req_type = req.get("type", "")
-                    
-                    # Strictly serialize video-related requests (1 at a time max)
-                    is_video = req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS", "UPSCALE_VIDEO")
-                    if is_video and len(self._active_video_ids) >= 1:
-                        continue
 
                     # Skip in-flight
                     if rid in self._active_ids:
@@ -204,8 +223,6 @@ class WorkerController:
                         continue
 
                     self._active_ids.add(rid)
-                    if is_video:
-                        self._active_video_ids.add(rid)
                     slots_available -= 1
                     asyncio.create_task(self._run_one(req))
 
@@ -221,8 +238,6 @@ class WorkerController:
 
     async def _run_one(self, req: dict):
         rid = req["id"]
-        req_type = req.get("type", "")
-        is_video = req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS", "UPSCALE_VIDEO")
         try:
             await self._rate_limiter.acquire()
             try:
@@ -231,17 +246,6 @@ class WorkerController:
                 self._rate_limiter.release()
         finally:
             self._active_ids.discard(rid)
-            if is_video:
-                self._active_video_ids.discard(rid)
-
-
-def _iso_from_epoch(epoch: float) -> str:
-    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _retry_at_after(delay_seconds: float) -> tuple[float, str]:
-    epoch = time.time() + delay_seconds
-    return epoch, _iso_from_epoch(epoch)
 
 
 async def _prerequisites_met(req: dict, orientation: str) -> bool:
@@ -337,7 +341,8 @@ async def _process_one(req: dict, deferred: dict = None, retry_after: dict = Non
         return
 
     logger.info("Processing request %s type=%s", rid[:8], req_type)
-    await crud.update_request(rid, status="PROCESSING", next_retry_at=None)
+    await crud.update_request(rid, status="PROCESSING")
+    await _mark_scene_status(req, "PROCESSING")
     await event_bus.emit("request_update", {"id": rid, "status": "PROCESSING", "type": req_type})
 
     try:
@@ -484,7 +489,6 @@ async def _recover_entity_not_found(req: dict) -> bool:
 
 
 async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict = None):
-    global _captcha_cooldown_until
     error_msg = result.get("error")
     if not error_msg:
         data = result.get("data", {})
@@ -513,6 +517,7 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
         if recovered:
             logger.info("Request %s: recovered expired media, retrying", rid[:8])
             await crud.update_request(rid, status="PENDING", error_message=f"recovered: {error_msg}")
+            await _mark_scene_status(req, "PENDING")
             return
 
     error_lower = str(error_msg).lower()
@@ -521,6 +526,7 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
     # Do NOT increment retry_count or resubmit. Just re-queue PENDING so worker resumes polling.
     if result.get("_workflow_timeout"):
         await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
+        await _mark_scene_status(req, "PENDING")
         logger.info(
             "Request %s workflow polling timeout — re-queuing PENDING to resume polling (no retry increment)",
             rid[:8]
@@ -530,40 +536,39 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
     # WS transient errors (extension disconnect/reconnect): retry without incrementing count
     if "extension reconnected" in error_lower or "extension disconnected" in error_lower or "extension not connected" in error_lower:
         await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
+        await _mark_scene_status(req, "PENDING")
         logger.info("Request %s transient WS error, will retry (no retry increment): %s", rid[:8], error_msg)
         return
 
-    # reCAPTCHA errors: retry up to 10 times with durable backoff. Unusual activity
-    # is a session/IP trust signal, so use a longer global cooldown instead of
-    # immediately burning every pending request.
+    # Missing Flow auth means the browser/extension is connected but no usable Google
+    # session token has been captured yet. Retrying burns the queue without helping.
+    if "no_flow_key" in error_lower or "no flow key" in error_lower:
+        await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
+        await _mark_scene_status(req, "PENDING")
+        get_worker_controller().pause("NO_FLOW_KEY")
+        logger.warning(
+            "Request %s blocked: Flow key missing; worker paused until Flow tab/login refreshes session",
+            rid[:8],
+        )
+        return
+
+    # reCAPTCHA errors: keep transient retries close to the original app behavior.
+    # PUBLIC_ERROR_UNUSUAL_ACTIVITY is different: repeated retries burn trust further, so pause the worker.
     if "captcha" in error_lower or "recaptcha" in error_lower:
         retry = req.get("retry_count", 0) + 1
         if retry < 10:
-            import random
-            if "public_error_unusual_activity" in error_lower or "unusual_activity" in error_lower:
-                delay = min(900 * retry, 3600) + random.randint(30, 120)
-                retry_epoch, next_retry_at = _retry_at_after(delay)
-                _captcha_cooldown_until = max(_captcha_cooldown_until, retry_epoch)
-                await event_bus.emit("worker_tick", {
-                    "active": 0,
-                    "slots": 0,
-                    "pending": 0,
-                    "captcha_cooldown_until": next_retry_at,
-                    "error": str(error_msg),
-                })
-            else:
-                delay = 30 + (retry * 10) + random.randint(1, 15)
-                retry_epoch, next_retry_at = _retry_at_after(delay)
-            await crud.update_request(
-                rid,
-                status="PENDING",
-                retry_count=retry,
-                next_retry_at=next_retry_at,
-                error_message=str(error_msg),
-            )
+            await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))
+            await _mark_scene_status(req, "PENDING")
+            if _is_unusual_activity_error(error_lower):
+                get_worker_controller().pause("CAPTCHA_UNUSUAL_ACTIVITY")
+                logger.warning(
+                    "Request %s reCAPTCHA unusual activity (retry %d/10); worker paused for manual resume: %s",
+                    rid[:8], retry, error_msg
+                )
+                return
             if retry_after is not None:
-                retry_after[rid] = retry_epoch
-            logger.warning("Request %s reCAPTCHA failed (retry %d/10), will retry at %s: %s", rid[:8], retry, next_retry_at, error_msg)
+                retry_after[rid] = time.time() + 30
+            logger.warning("Request %s reCAPTCHA failed (retry %d/10), will retry in 30s: %s", rid[:8], retry, error_msg)
             return
         else:
             await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
@@ -574,16 +579,16 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
     retry = req.get("retry_count", 0) + 1
     if retry < MAX_RETRIES:
         now = time.time()
-        delay = min(2 ** retry * 10, 300)
-        retry_epoch, next_retry_at = _retry_at_after(delay)
         if retry_after is not None:
             ra = retry_after.get(rid, 0.0)
             if ra > now:
                 # Still in backoff — reset to PENDING so it's not stuck in PROCESSING
                 await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
+                await _mark_scene_status(req, "PENDING")
                 return
-            retry_after[rid] = retry_epoch
-        await crud.update_request(rid, status="PENDING", retry_count=retry, next_retry_at=next_retry_at, error_message=str(error_msg))
+            retry_after[rid] = now + min(2 ** retry * 10, 300)
+        await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))
+        await _mark_scene_status(req, "PENDING")
         logger.warning("Request %s failed (retry %d/%d): %s", rid[:8], retry, MAX_RETRIES, error_msg)
     else:
         await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
@@ -592,6 +597,10 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
 
 
 async def _mark_scene_failed(req: dict):
+    await _mark_scene_status(req, "FAILED")
+
+
+async def _mark_scene_status(req: dict, status: str):
     scene_id = req.get("scene_id")
     if not scene_id:
         return
@@ -600,11 +609,11 @@ async def _mark_scene_failed(req: dict):
     req_type = req["type"]
     updates = {}
     if req_type in ("GENERATE_IMAGE", "REGENERATE_IMAGE", "EDIT_IMAGE"):
-        updates[f"{prefix}_image_status"] = "FAILED"
+        updates[f"{prefix}_image_status"] = status
     elif req_type in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS"):
-        updates[f"{prefix}_video_status"] = "FAILED"
+        updates[f"{prefix}_video_status"] = status
     elif req_type == "UPSCALE_VIDEO":
-        updates[f"{prefix}_upscale_status"] = "FAILED"
+        updates[f"{prefix}_upscale_status"] = status
     if updates:
         await crud.update_scene(scene_id, **updates)
 

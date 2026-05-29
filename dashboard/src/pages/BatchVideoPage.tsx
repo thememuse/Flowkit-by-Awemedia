@@ -18,6 +18,9 @@ interface BatchStatus {
   failed: number
   done: boolean
   all_succeeded: boolean
+  worker_paused?: boolean
+  blocked?: boolean
+  last_error?: string | null
 }
 
 interface VideoError {
@@ -259,6 +262,14 @@ export default function BatchVideoPage() {
           `/api/requests/batch-status?${queryParam}&type=${type}&since=${encodeURIComponent(since)}`
         )
         setBatchStatus(s)
+        if (s.blocked) {
+          if (pollRef.current) clearInterval(pollRef.current)
+          setBatchRunning(false)
+          setBatchType(null)
+          setPipelineStage('idle')
+          loadData(true)
+          return
+        }
         if (s.done) {
           if (pollRef.current) clearInterval(pollRef.current)
           setBatchRunning(false)
@@ -1092,11 +1103,20 @@ export default function BatchVideoPage() {
         </div>
 
         {/* Batch status bar */}
-        {batchRunning && batchStatus && batchStatus.total > 0 && pipelineStage === 'idle' && (
-          <div className="p-3 rounded-lg flex flex-col gap-1.5 text-xs" style={{ background: 'rgba(124,91,245,0.06)', border: '1px solid rgba(124,91,245,0.15)' }}>
-            <div className="flex justify-between" style={{ color: 'var(--accent)' }}>
+        {batchStatus && (batchRunning || batchStatus.blocked) && batchStatus.total > 0 && pipelineStage === 'idle' && (
+          <div
+            className="p-3 rounded-lg flex flex-col gap-1.5 text-xs"
+            style={{
+              background: batchStatus.blocked ? 'rgba(239,68,68,0.06)' : 'rgba(124,91,245,0.06)',
+              border: `1px solid ${batchStatus.blocked ? 'rgba(239,68,68,0.2)' : 'rgba(124,91,245,0.15)'}`,
+            }}
+          >
+            <div className="flex justify-between" style={{ color: batchStatus.blocked ? 'var(--red)' : 'var(--accent)' }}>
               <span className="font-semibold flex items-center gap-1">
-                <Loader2 size={11} className="spin" /> Hàng chờ render: {batchType}
+                {batchStatus.blocked ? <AlertCircle size={11} /> : <Loader2 size={11} className="spin" />}
+                {batchStatus.blocked
+                  ? `Tạm dừng: ${batchStatus.last_error || 'Worker paused'}`
+                  : `Hàng chờ render: ${batchType}`}
               </span>
               <span>{batchStatus.completed}/{batchStatus.total} hoàn thành</span>
             </div>

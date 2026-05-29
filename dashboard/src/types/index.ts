@@ -108,7 +108,6 @@ export interface Request {
   output_url: string | null
   error_message: string | null
   retry_count: number
-  next_retry_at: string | null
   created_at: string
   updated_at: string
 }

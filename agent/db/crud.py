@@ -274,14 +274,12 @@ async def list_pending_requests() -> list[dict]:
 async def list_actionable_requests(exclude_ids: set[str] = None, limit: int = 5) -> list[dict]:
     """Priority-ordered fetch of PENDING requests ready to process."""
     db = await get_db()
-    now = _now()
     exclude = exclude_ids or set()
 
     # Fetch all pending, filter in Python (SQLite doesn't support parameterized IN with variable length)
     cur = await db.execute("""
         SELECT * FROM request
         WHERE status = 'PENDING'
-          AND (next_retry_at IS NULL OR next_retry_at <= ?)
         ORDER BY
           CASE type
             WHEN 'GENERATE_CHARACTER_IMAGE' THEN 0
@@ -296,7 +294,7 @@ async def list_actionable_requests(exclude_ids: set[str] = None, limit: int = 5)
             ELSE 2
           END,
           created_at ASC
-    """, (now,))
+    """)
     rows = [dict(r) for r in await cur.fetchall()]
     # Exclude in-flight IDs
     filtered = [r for r in rows if r["id"] not in exclude]
