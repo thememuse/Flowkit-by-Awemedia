@@ -128,7 +128,7 @@ async def lifespan(app: FastAPI):
     logger.info("Flow Kit stopped")
 
 
-app = FastAPI(title="Flow Kit", version="1.2.9", lifespan=lifespan)
+app = FastAPI(title="Flow Kit", version="1.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -201,7 +201,7 @@ async def health():
     client = get_flow_client()
     return {
         "status": "ok",
-        "version": "1.2.9",
+        "version": "1.3.0",
         "extension_connected": client.connected,
         "flow_key_present": client.flow_key_present,
         "ws": client.ws_stats,

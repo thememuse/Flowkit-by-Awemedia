@@ -857,7 +857,7 @@ function StylesTab({ settings, update, materials, onMaterialAdded, onMaterialDel
 // ── Info tab ───────────────────────────────────────────────
 function InfoTab() {
   const [license, setLicense] = useState<{ active: boolean; key?: string; expiresAt?: string; durationType?: string; machineId?: string } | null>(null)
-  const [version, setVersion] = useState<string>('1.2.9')
+  const [version, setVersion] = useState<string>('1.3.0')
 
   useEffect(() => {
     fetchAPI<{ version: string }>('/health')

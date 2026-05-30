@@ -1,6 +1,8 @@
 """Unit tests for agent/worker/processor.py — heavy mocking of crud, flow_client, operations."""
 
+import asyncio
 import pytest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from agent.worker.processor import (
@@ -65,7 +67,8 @@ class TestWorkerControllerCleanup:
         controller = WorkerController()
         stale = [make_req(req_type="GENERATE_VIDEO", scene_id="scene-001", orientation="VERTICAL")]
 
-        with patch("agent.worker.processor.crud") as mock_crud:
+        with patch("agent.worker.processor.crud") as mock_crud, \
+                patch("agent.worker.processor._utc_after", return_value="2026-05-30T00:05:00Z"):
             mock_crud.list_requests = AsyncMock(return_value=stale)
             mock_crud.update_request = AsyncMock()
             mock_crud.update_scene = AsyncMock()
@@ -75,6 +78,7 @@ class TestWorkerControllerCleanup:
             stale[0]["id"],
             status="PENDING",
             error_message="reset: stale PROCESSING on startup",
+            next_retry_at="2026-05-30T00:05:00Z",
         )
         mock_crud.update_scene.assert_awaited_once_with("scene-001", vertical_video_status="PENDING")
 
@@ -89,6 +93,39 @@ class TestWorkerControllerCleanup:
 
         assert controller.paused is True
         assert controller.pause_reason == "STALE_QUEUE"
+
+    @pytest.mark.asyncio
+    async def test_overdue_active_task_is_cancelled_and_requeued(self):
+        controller = WorkerController()
+        req = make_req(req_type="GENERATE_VIDEO")
+        rid = req["id"]
+        task = asyncio.create_task(asyncio.sleep(60))
+        controller._active_ids.add(rid)
+        controller._active_tasks[rid] = task
+        controller._active_started[rid] = 0
+
+        with patch("agent.worker.processor.crud") as mock_crud, \
+                patch("agent.worker.processor.event_bus") as mock_bus, \
+                patch("agent.worker.processor._config") as mock_config:
+            mock_config.STALE_PROCESSING_TIMEOUT = 1
+            mock_config.VIDEO_POLL_TIMEOUT = 1
+            mock_crud.get_request = AsyncMock(return_value=req)
+            mock_crud.update_request = AsyncMock()
+            mock_crud.update_scene = AsyncMock()
+            mock_bus.emit = AsyncMock()
+
+            await controller._cancel_overdue_active_tasks()
+
+        assert task.cancelling()
+        mock_crud.update_request.assert_awaited_once()
+        call = mock_crud.update_request.await_args
+        assert call.args[0] == rid
+        assert call.kwargs["status"] == "PENDING"
+        assert call.kwargs["next_retry_at"]
+        assert call.kwargs["error_message"].startswith("reset: active worker timeout")
+        mock_crud.update_scene.assert_awaited_once_with("scene-001", vertical_video_status="PENDING")
+        task.cancel()
+        await asyncio.sleep(0)
 
 
 # ---------------------------------------------------------------------------
@@ -338,3 +375,74 @@ class TestHandleFailure:
         scene_status_updates = [call.kwargs for call in mock_crud.update_scene.await_args_list]
         assert {"vertical_image_status": "PROCESSING"} in scene_status_updates
         assert {"vertical_image_status": "PENDING"} in scene_status_updates
+
+    @pytest.mark.asyncio
+    async def test_workflow_timeout_backs_off_to_avoid_queue_starvation(self):
+        req = make_req(req_type="GENERATE_VIDEO", retry_count=1)
+        rid = req["id"]
+
+        with patch("agent.worker.processor.crud") as mock_crud, \
+                patch("agent.worker.processor._utc_after", return_value="2026-05-30T00:05:00Z"):
+            mock_crud.update_request = AsyncMock()
+            mock_crud.update_scene = AsyncMock()
+            await _handle_failure(
+                rid,
+                req,
+                {"error": "Workflow polling timeout after 900s", "_workflow_timeout": True},
+                {},
+            )
+
+        mock_crud.update_request.assert_awaited_once_with(
+            rid,
+            status="PENDING",
+            retry_count=2,
+            next_retry_at="2026-05-30T00:05:00Z",
+            error_message="Workflow polling timeout after 900s",
+        )
+        mock_crud.update_scene.assert_awaited_once_with("scene-001", vertical_video_status="PENDING")
+
+    @pytest.mark.asyncio
+    async def test_workflow_timeout_fails_after_max_attempts(self):
+        req = make_req(req_type="GENERATE_VIDEO", retry_count=MAX_RETRIES - 1)
+        rid = req["id"]
+
+        with patch("agent.worker.processor.crud") as mock_crud:
+            mock_crud.update_request = AsyncMock()
+            mock_crud.update_scene = AsyncMock()
+            await _handle_failure(
+                rid,
+                req,
+                {"error": "Workflow polling timeout after 900s", "_workflow_timeout": True},
+                {},
+            )
+
+        mock_crud.update_request.assert_awaited_once_with(
+            rid,
+            status="FAILED",
+            error_message="Workflow polling timeout after 900s",
+        )
+        mock_crud.update_scene.assert_awaited_once_with("scene-001", vertical_video_status="FAILED")
+
+    @pytest.mark.asyncio
+    async def test_processing_and_success_clear_stale_error_message(self):
+        """Retried workflow timeouts should not keep showing a stale error after progress/success."""
+        req = make_req(req_type="GENERATE_IMAGE", scene_id="scene-001", orientation="VERTICAL")
+        result = SimpleNamespace(media_id="media-001", url="file://video.mp4")
+
+        with patch("agent.worker.processor.crud") as mock_crud, \
+                patch("agent.worker.processor._is_already_completed", new_callable=AsyncMock, return_value=False), \
+                patch("agent.worker.processor._dispatch", new_callable=AsyncMock, return_value={"data": "ok"}), \
+                patch("agent.worker.processor.parse_result", return_value=result), \
+                patch("agent.worker.processor.apply_scene_result", new_callable=AsyncMock), \
+                patch("agent.worker.processor.event_bus") as mock_bus:
+            mock_crud.update_request = AsyncMock()
+            mock_crud.update_scene = AsyncMock()
+            mock_bus.emit = AsyncMock()
+
+            await _process_one(req, retry_after={})
+
+        calls = mock_crud.update_request.await_args_list
+        assert calls[0].kwargs == {"status": "PROCESSING", "error_message": None, "next_retry_at": None}
+        assert calls[-1].kwargs["status"] == "COMPLETED"
+        assert calls[-1].kwargs["error_message"] is None
+        assert calls[-1].kwargs["next_retry_at"] is None

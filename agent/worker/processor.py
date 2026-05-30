@@ -8,6 +8,7 @@ import base64
 import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 
@@ -38,6 +39,10 @@ def _is_unusual_activity_error(error_lower: str) -> bool:
     return "public_error_unusual_activity" in error_lower or "unusual_activity" in error_lower
 
 
+def _utc_after(seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class APIRateLimiter:
     """Enforces max concurrent requests AND minimum gap between API calls."""
     def __init__(self, max_concurrent: int, cooldown_seconds: float):
@@ -64,6 +69,8 @@ class WorkerController:
     def __init__(self):
         self._shutdown = asyncio.Event()
         self._active_ids: set[str] = set()
+        self._active_tasks: dict[str, asyncio.Task] = {}
+        self._active_started: dict[str, float] = {}
         self._rate_limiter = APIRateLimiter(MAX_CONCURRENT_REQUESTS, API_COOLDOWN)
         self._deferred: dict[str, float] = {}  # rid -> defer_until timestamp
         self._retry_after: dict[str, float] = {}  # rid -> retry_after timestamp
@@ -149,8 +156,13 @@ class WorkerController:
         try:
             stale = await crud.list_requests(status="PROCESSING")
             for req in stale:
-                await crud.update_request(req["id"], status="PENDING",
-                                          error_message="reset: stale PROCESSING on startup")
+                update = {
+                    "status": "PENDING",
+                    "error_message": "reset: stale PROCESSING on startup",
+                }
+                if req.get("type") in ("GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS", "UPSCALE_VIDEO"):
+                    update["next_retry_at"] = _utc_after(300)
+                await crud.update_request(req["id"], **update)
                 await _mark_scene_status(req, "PENDING")
                 logger.warning("Stale request reset: %s type=%s", req["id"][:8], req.get("type"))
             if stale:
@@ -158,11 +170,56 @@ class WorkerController:
         except Exception as e:
             logger.warning("Could not clean up stale requests: %s", e)
 
+    def _prune_active_tasks(self):
+        """Drop finished task bookkeeping so slots reflect reality."""
+        for rid, task in list(self._active_tasks.items()):
+            if not task.done():
+                continue
+            self._active_tasks.pop(rid, None)
+            self._active_started.pop(rid, None)
+            self._active_ids.discard(rid)
+
+    async def _cancel_overdue_active_tasks(self):
+        """Cancel requests whose worker coroutine exceeded its own polling window."""
+        timeout = max(_config.STALE_PROCESSING_TIMEOUT, _config.VIDEO_POLL_TIMEOUT + 300)
+        now = time.time()
+        for rid, task in list(self._active_tasks.items()):
+            if task.done() or task.cancelled():
+                continue
+            started = self._active_started.get(rid, now)
+            elapsed = now - started
+            if elapsed < timeout:
+                continue
+
+            logger.warning(
+                "Active request %s exceeded %.0fs; cancelling task and re-queueing",
+                rid[:8],
+                timeout,
+            )
+            task.cancel()
+            req = await crud.get_request(rid)
+            if req:
+                await crud.update_request(
+                    rid,
+                    status="PENDING",
+                    next_retry_at=_utc_after(300),
+                    error_message=f"reset: active worker timeout after {int(elapsed)}s",
+                )
+                await _mark_scene_status(req, "PENDING")
+                await event_bus.emit("request_update", {
+                    "id": rid,
+                    "status": "PENDING",
+                    "error": "active worker timeout",
+                })
+
     async def _run_loop(self):
         client = get_flow_client()
 
         while not self._shutdown.is_set():
             try:
+                self._prune_active_tasks()
+                await self._cancel_overdue_active_tasks()
+
                 if self._paused:
                     await asyncio.sleep(POLL_INTERVAL)
                     continue
@@ -223,8 +280,9 @@ class WorkerController:
                         continue
 
                     self._active_ids.add(rid)
+                    self._active_started[rid] = now
                     slots_available -= 1
-                    asyncio.create_task(self._run_one(req))
+                    self._active_tasks[rid] = asyncio.create_task(self._run_one(req))
 
                 # Prune stale deferred/retry entries for requests no longer pending
                 pending_ids = {r["id"] for r in pending}
@@ -246,6 +304,8 @@ class WorkerController:
                 self._rate_limiter.release()
         finally:
             self._active_ids.discard(rid)
+            self._active_tasks.pop(rid, None)
+            self._active_started.pop(rid, None)
 
 
 async def _prerequisites_met(req: dict, orientation: str) -> bool:
@@ -341,7 +401,7 @@ async def _process_one(req: dict, deferred: dict = None, retry_after: dict = Non
         return
 
     logger.info("Processing request %s type=%s", rid[:8], req_type)
-    await crud.update_request(rid, status="PROCESSING")
+    await crud.update_request(rid, status="PROCESSING", error_message=None, next_retry_at=None)
     await _mark_scene_status(req, "PROCESSING")
     await event_bus.emit("request_update", {"id": rid, "status": "PROCESSING", "type": req_type})
 
@@ -351,7 +411,14 @@ async def _process_one(req: dict, deferred: dict = None, retry_after: dict = Non
             await _handle_failure(rid, req, result, retry_after)
         else:
             gen_result = parse_result(result, req_type)
-            await crud.update_request(rid, status="COMPLETED", media_id=gen_result.media_id, output_url=gen_result.url)
+            await crud.update_request(
+                rid,
+                status="COMPLETED",
+                media_id=gen_result.media_id,
+                output_url=gen_result.url,
+                error_message=None,
+                next_retry_at=None,
+            )
             if req_type in ("GENERATE_CHARACTER_IMAGE", "REGENERATE_CHARACTER_IMAGE", "EDIT_CHARACTER_IMAGE"):
                 char_id = req.get("character_id")
                 if char_id:
@@ -522,15 +589,30 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
 
     error_lower = str(error_msg).lower()
 
-    # Workflow polling timeout (soft timeout — video still generating on Google's servers)
-    # Do NOT increment retry_count or resubmit. Just re-queue PENDING so worker resumes polling.
+    # Workflow polling timeout is soft: the video may still complete on Google's
+    # servers. Back it off so later queued scenes can use worker slots; otherwise
+    # old long-running workflows can starve the whole batch forever.
     if result.get("_workflow_timeout"):
-        await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
-        await _mark_scene_status(req, "PENDING")
-        logger.info(
-            "Request %s workflow polling timeout — re-queuing PENDING to resume polling (no retry increment)",
-            rid[:8]
-        )
+        retry = req.get("retry_count", 0) + 1
+        if retry < MAX_RETRIES:
+            backoff = min(300 * retry, 900)
+            await crud.update_request(
+                rid,
+                status="PENDING",
+                retry_count=retry,
+                next_retry_at=_utc_after(backoff),
+                error_message=str(error_msg),
+            )
+            await _mark_scene_status(req, "PENDING")
+            logger.info(
+                "Request %s workflow polling timeout (attempt %d/%d); backoff %ds before resume",
+                rid[:8], retry, MAX_RETRIES, backoff,
+            )
+            return
+
+        await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
+        await _mark_scene_failed(req)
+        logger.error("Request %s FAILED after %d workflow polling timeouts: %s", rid[:8], MAX_RETRIES, error_msg)
         return
 
     # WS transient errors (extension disconnect/reconnect): retry without incrementing count

@@ -104,7 +104,7 @@ linux:
         - x64
   category: Utility
 
-# Auto-update
-publish:
-  provider: github
-  releaseType: release
+# Auto-update/publishing is configured by CI/release jobs. Keeping publish
+# metadata out of the base config makes local/package builds work from a source
+# archive that does not contain .git/config.
+publish: null

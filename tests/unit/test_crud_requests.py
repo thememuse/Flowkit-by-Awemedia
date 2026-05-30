@@ -28,7 +28,7 @@ class _FakeDb:
 
 
 @pytest.mark.asyncio
-async def test_list_actionable_requests_ignores_stale_next_retry_at():
+async def test_list_actionable_requests_filters_future_next_retry_at_in_sql():
     db = _FakeDb([
         {
             "id": "req-visible",
@@ -43,5 +43,5 @@ async def test_list_actionable_requests_ignores_stale_next_retry_at():
         rows = await crud.list_actionable_requests(limit=5)
 
     assert rows == db.rows
-    assert "next_retry_at" not in db.query.lower()
-    assert db.params is None
+    assert "next_retry_at is null or next_retry_at <= ?" in " ".join(db.query.lower().split())
+    assert len(db.params) == 1
